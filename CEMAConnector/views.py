@@ -70,22 +70,36 @@ class UnidView(BaseView):
 
     def post(self, request, format=None):
         return self.query_database(self.table_name, self.column_names, request)
-class ProcedView(BaseView):
+class EspecialidadeBasica(BaseView):
     parser_classes = [JSONParser]
     column_names = ['vGPRO_CD', 'VGPRO_DS','VPRRE_CD','VPRRE_DS','VITCO_CD']
     table_name = 'V_APP_PROCED'
 
     def post(self, request, format=None):
         return self.query_database(self.table_name, self.column_names, request)
-    
-class ConvPlanView(BaseView):
+
+# Pesquisar Planos disponiveis    
+class PlanosDisponiveis(BaseView):
     parser_classes = [JSONParser]
+
     column_names = ['vCONV_CD', 'vCONV_DS', 'vPLAN_CD', 'vPLAN_DS', 'vSUP2_CD']
     table_name = 'V_APP_CONV_PLAN'
 
     def post(self, request, format=None):
         return self.query_database(self.table_name, self.column_names, request)
+    
+# Pesquisar convenios disponiveis
+class ConveniosDisponiveis(BaseView):
+    parser_classes = [JSONParser]
 
+    column_names = ['VCONV_CD','VCONV_DS','VREGANS','VUNID_CD','VUNID_DS']
+    table_name = 'V_APP_CONVENIO'
+
+    def post(self, request, format=None):
+        print("Table Name:", self.table_name)
+        return self.query_database(self.table_name, self.column_names, request)
+
+# Busca convênio do paciente consultando CPF 
 class BuscarConvenioView(BaseView):
     parser_classes = [JSONParser]
 
@@ -147,9 +161,9 @@ class BuscarConvenioView(BaseView):
             FETCH p_recordset INTO v_tp, v_cd_conv, v_convenio, v_cd_plano, v_plano, v_produto;
             EXIT WHEN p_recordset%NOTFOUND;
             DBMS_OUTPUT.PUT_LINE('Tipo: ' || v_tp);
-            DBMS_OUTPUT.PUT_LINE('Código Convênio: ' || v_cd_conv);
-            DBMS_OUTPUT.PUT_LINE('Convênio: ' || v_convenio);
-            DBMS_OUTPUT.PUT_LINE('Código Plano: ' || v_cd_plano);
+            DBMS_OUTPUT.PUT_LINE('Codigo Convenio: ' || v_cd_conv);
+            DBMS_OUTPUT.PUT_LINE('Convenio: ' || v_convenio);
+            DBMS_OUTPUT.PUT_LINE('Codigo Plano: ' || v_cd_plano);
             DBMS_OUTPUT.PUT_LINE('Plano: ' || v_plano);
             DBMS_OUTPUT.PUT_LINE('Produto: ' || v_produto);
         END LOOP;
@@ -186,7 +200,7 @@ class BuscarConvenioView(BaseView):
         finally:
             client.close()
 
-
+# Busca para validar se o paciente existe
 class BuscarPacienteView(APIView):
     parser_classes = [JSONParser]
 
@@ -198,6 +212,8 @@ class BuscarPacienteView(APIView):
         print("Paciente_phone recebido:", patient_phone)  # Debugging
 
         paciente, data_paciente = self.verificar_paciente(patient_phone)
+        if paciente is None:
+            return Response({"error": "Erro ao verificar paciente"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         if 'error' in paciente:
             return Response({"error": paciente['error']}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         elif not data_paciente:
@@ -275,7 +291,7 @@ class BuscarPacienteView(APIView):
                 """)
                 errors = stderr.read().decode('utf-8')
                 if errors:
-                    return Response({"error": errors}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                    return {"error": errors}, None
 
                 output = stdout.read().decode('utf-8').strip()
                 print(output)
@@ -288,11 +304,10 @@ class BuscarPacienteView(APIView):
                         data[key.strip()] = value.strip()
 
                 if not data:  # Se nenhum dado foi adicionado ao dicionário
-                    return Response({"message": "Nenhum registro encontrado para o número de telefone fornecido."}, status=status.HTTP_200_OK)
+                    return {}, None
 
                 return {}, data
             except paramiko.SSHException as e:
-                return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                return {"error": str(e)}, None # Erro no SSH
             finally:
                 client.close()
-
