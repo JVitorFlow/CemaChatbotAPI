@@ -12,7 +12,30 @@ class BaseView(APIView):
     parser_classes = [JSONParser]
 
     @staticmethod
-    def query_database(table_name, column_names, request):
+    def process_output(output, column_names):
+
+        if column_names is None:
+            print("Aviso: 'column_names' está None, nenhum dado será processado.")
+            return []
+
+
+        data = []
+        lines = output.split('\n')
+        data_line_regex = re.compile(r'^\s*\d+')  # Regex para identificar linhas que começam com números
+
+        for line in lines:
+            if re.match(r'^\s*\d', line):  # Modificado para capturar linhas que começam com números
+                parts = line.split('|')  # Considerando que o delimitador é '|'
+                if len(parts) == len(column_names):
+                    # Strip each part to remove leading/trailing whitespace
+                    record = dict(zip(column_names, [p.strip() for p in parts]))
+                    data.append(record)
+                else:
+                    print("Erro de formatação:", line)
+        return data
+    
+    @staticmethod
+    def query_database(table_name=None, column_names=None, request=None, custom_query=None):
         hostname = config('HOSTNAME')
         ssh_port = config('SSH_PORT', cast=int)
         username = config('USERNAME_ORACLE')
@@ -20,23 +43,26 @@ class BaseView(APIView):
         sqlplus_path = config('SQLPLUS_PATH')
         connection_string = config('CONNECTION_STRING')
 
-        filters = request.data.get('filters', {})
-        where_clause = " AND ".join([f"{column} = '{value}'" for column, value in filters.items() if column in column_names])
+        if custom_query:
+            plsql_block = custom_query
+        else:    
+            filters = request.data.get('filters', {})
+            where_clause = " AND ".join([f"{column} = '{value}'" for column, value in filters.items() if column in column_names])
 
-        plsql_block = f"""
-        SET PAGESIZE 0
-        SET FEEDBACK OFF
-        SET VERIFY OFF
-        SET HEADING OFF
-        SET ECHO OFF
-        SET LINESIZE 32767
-        SET TRIMSPOOL ON
-        SET COLSEP '|'
-        SELECT {", ".join(column_names)}
-        FROM {table_name}
-        {f'WHERE {where_clause}' if where_clause else ''};
-        EXIT;
-        """
+            plsql_block = f"""
+            SET PAGESIZE 0
+            SET FEEDBACK OFF
+            SET VERIFY OFF
+            SET HEADING OFF
+            SET ECHO OFF
+            SET LINESIZE 32767
+            SET TRIMSPOOL ON
+            SET COLSEP '|'
+            SELECT {", ".join(column_names)}
+            FROM {table_name}
+            {f'WHERE {where_clause}' if where_clause else ''};
+            EXIT;
+            """
 
         try:
             client = get_ssh_client(hostname, ssh_port, username, password)
@@ -45,14 +71,21 @@ class BaseView(APIView):
             export PATH={sqlplus_path}:$PATH
             echo "{plsql_block}" | sqlplus -S {connection_string}
             """)
+            
             errors = stderr.read().decode('utf-8')
             if errors:
                 return Response({"error": errors}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
             output = stdout.read().decode('utf-8').strip()
-            data = [
-                dict(zip(column_names, re.sub(r'\s+', ' ', line).strip().split('|')))
-                for line in output.split('\n') if line and not line.startswith('-') and not line.isspace()
-            ]
+            print("Saída crua do SQLPlus:", output)
+            # Decidindo sobre o processamento de saída
+            if not custom_query:
+                data = [
+                    dict(zip(column_names, re.sub(r'\s+', ' ', line).strip().split('|')))
+                    for line in output.split('\n') if line and not line.startswith('-') and not line.isspace()
+                ]
+            else:
+                data = BaseView.process_output(output, column_names)
+
             return Response({"data": data}, status=status.HTTP_200_OK)
         except paramiko.SSHException as e:
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -78,28 +111,52 @@ class EspecialidadeBasica(BaseView):
     def post(self, request, format=None):
         return self.query_database(self.table_name, self.column_names, request)
 
-# Pesquisar Planos disponiveis    
-class PlanosDisponiveis(BaseView):
-    parser_classes = [JSONParser]
+# Pesquisar Planos disponiveis   e Busca convênio do paciente consultando CPF 
+class ConvenioDetalhesView(BaseView):
 
-    column_names = ['vCONV_CD', 'vCONV_DS', 'vPLAN_CD', 'vPLAN_DS', 'vSUP2_CD']
-    table_name = 'V_APP_CONV_PLAN'
+    def query_database(self, custom_query=None, column_names=None):
+        return super().query_database(custom_query=custom_query, column_names=column_names)
 
-    def post(self, request, format=None):
-        return self.query_database(self.table_name, self.column_names, request)
-    
-# Pesquisar convenios disponiveis
-class ConveniosDisponiveis(BaseView):
-    parser_classes = [JSONParser]
+    def post(self, request):
+        # Obtém a descrição do convênio a partir do corpo da requisição POST
+        descricao = request.data.get('descricao', '')
 
-    column_names = ['VCONV_CD','VCONV_DS','VREGANS','VUNID_CD','VUNID_DS']
-    table_name = 'V_APP_CONVENIO'
+        # Constrói a consulta SQL para buscar convênios 
+        # V_APP_CONVENIO INDICA AS UNIDADES DISPONIVEIS CREDENCIADAS PARA ATENDIMENTO DO CONVENIO
+        convenios_query = f"""
+        SET COLSEP '|'
+        SELECT VCONV_CD, VCONV_DS, VREGANS, VUNID_CD, VUNID_DS
+        FROM V_APP_CONVENIO
+        WHERE UPPER(VCONV_DS) LIKE '%{descricao.upper()}%';
+        """
 
-    def post(self, request, format=None):
-        print("Table Name:", self.table_name)
-        return self.query_database(self.table_name, self.column_names, request)
+        # Executa a consulta no banco de dados via SSH
+        convenios_response = self.query_database(custom_query=convenios_query, column_names=["VCONV_CD", "VCONV_DS", "VREGANS", "VUNID_CD", "VUNID_DS"])
+        if convenios_response.status_code != 200:
+            return convenios_response
 
-# Busca convênio do paciente consultando CPF 
+        convenios = convenios_response.data.get('data', [])
+        # Itera pelos convênios para buscar os planos relacionados
+        resultado = []
+        for convenio in convenios:
+            vconv_cd = convenio['VCONV_CD']
+            planos_query = f"""
+            SET COLSEP '|'
+            SELECT VPLAN_CD, VPLAN_DS, VSUP2_CD
+            FROM V_APP_CONV_PLAN
+            WHERE VCONV_CD = '{vconv_cd}';
+            """
+            planos_response = self.query_database(custom_query=planos_query, column_names=["VPLAN_CD", "VPLAN_DS", "VSUP2_CD"])
+            if planos_response.status_code != 200:
+                return planos_response
+            
+            planos = planos_response.data.get('data', [])
+            convenio['planos'] = planos
+            resultado.append(convenio)
+
+
+        return Response({"data": resultado})
+
 class BuscarConvenioView(BaseView):
     parser_classes = [JSONParser]
 
@@ -199,7 +256,7 @@ class BuscarConvenioView(BaseView):
 
         finally:
             client.close()
-
+        
 # Busca para validar se o paciente existe
 class BuscarPacienteView(APIView):
     parser_classes = [JSONParser]
