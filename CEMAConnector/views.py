@@ -830,27 +830,31 @@ class BuscarHorario(APIView):
             client.close()
 
     def parse_output(self, output):
-        results = []
-        current_data = {}
+        results = {}
         for line in output.split('\n'):
-            line = line.strip()
-            if '-----' in line:
-                continue  # Ignora linhas de cabeçalho ou rodapé com "-----"
-            
-            if line.startswith('Unidade: '):  # Considera 'Unidade: ' como o início de um novo registro
-                if current_data:
-                    results.append(current_data)  # Salva o registro atual antes de começar um novo
-                    current_data = {}  # Inicia um novo registro
+            if 'Unidade' in line and 'DS:' in line:
+                unidade = line.split('DS: ')[1].strip()
+            elif 'Codigo Local CD' in line and 'NM:' in line:
+                nome_medico = line.split('NM: ')[1].strip()
+                if nome_medico not in results:
+                    results[nome_medico] = {
+                        "Unidade": unidade,
+                        "Nome Médico": nome_medico,
+                        "Horários": []
+                    }
+            elif 'Data Agendamento' in line:
+                data_agendamento = line.split(': ')[1].strip()
+                results[nome_medico]["Data Agendamento"] = data_agendamento  # Set data outside the Horários list
+            elif 'Hora HH' in line:
+                hora = line.split(': ')[1].strip()
+                results[nome_medico]["Horários"].append(hora)  # Add only hour to the Horários list
 
-            key_value = line.split(': ', 1)  # Split only on the first colon
-            if len(key_value) == 2:
-                key, value = key_value
-                current_data[key.strip()] = value.strip()
+        return {"data": list(results.values())}
 
-        if current_data:  # Para adicionar o último registro se não foi adicionado ainda
-            results.append(current_data)
 
-        return results
+
+
+
 
 
 class RegistrarAgendamento(APIView):
