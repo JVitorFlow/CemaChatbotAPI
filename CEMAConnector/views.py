@@ -421,6 +421,7 @@ class CadastrarNovoPaciente(APIView):
 class BuscarDataDisponivel(APIView):
     # app_agd.p_get_date_crm
     """
+    COnfirma disponibilidade do médico na data informada
     Endpoint para buscar datas disponíveis para procedimentos médicos em unidades específicas.
 
     Parâmetros do POST:
@@ -480,21 +481,21 @@ class BuscarDataDisponivel(APIView):
             'IBIRAPUERA': {'codigo': 31, 'nome': 'IBIRAPUERA'}
         }
 
-        procedimento_mapping = {
+        especialidade_mapping = {
             'OFTALMOLOGIA': {'codigo': 1, 'descricao': 'Oftalmologia'},
             'OTORRINOLARINGOLOGIA': {'codigo': 2, 'descricao': 'Otorrinolaringologia'}
         }
 
         unidade = data.get('unidade', '').upper()
-        procedimento = data.get('procedimento', '').upper()
+        especialidade = data.get('especialidade', '').upper()
         data_consulta = data.get('data_consulta', datetime.now().strftime('%d/%m/%Y'))
 
-        if unidade not in unidade_mapping or procedimento not in procedimento_mapping:
-            return Response({"error": "Unidade ou procedimento inválido."}, status=status.HTTP_400_BAD_REQUEST)
+        if unidade not in unidade_mapping or especialidade not in especialidade_mapping:
+            return Response({"error": "Unidade ou especialidade inválido."}, status=status.HTTP_400_BAD_REQUEST)
 
 
         unidade_codigo = unidade_mapping[unidade]['codigo']
-        procedimento_codigo = procedimento_mapping[procedimento]['codigo']
+        especialidade_codigo = especialidade_mapping[especialidade]['codigo']
 
 
         try:
@@ -517,7 +518,7 @@ class BuscarDataDisponivel(APIView):
             p_origem VARCHAR2(100) := 'C';
             p_vunid_cd NUMBER := {unidade_codigo};
             p_vgpro_cd NUMBER := 1;
-            p_vprre_cd NUMBER := {procedimento_codigo};
+            p_vprre_cd NUMBER := {especialidade_codigo};
             p_vsues_cd NUMBER := NULL;
             p_vdt DATE := TO_DATE('{data_formatada}', 'YYYY-MM-DD');
             p_vdt_fim DATE := NULL;
@@ -630,17 +631,29 @@ class BuscarDataDisponivel(APIView):
             if current_data:  # Adicionar o último registro se houver
                 results.append(current_data)
 
-            final_results = []
+            # Agrupar resultados por médico
+            grouped_results = {}
             for result in results:
-                final_results.append({
-                    "Unidade": unidade_mapping[unidade]['nome'],
-                    "ID Médico": result.get('VCOCL_CD', 'Não especificado'),
-                    "Nome do Médico": result.get('VCOCL_NM', 'Não especificado'),
-                    "Tipo de Consulta": result.get('VGPRO_DS', 'Consulta'),
-                    "Procedimento": result.get('VPRRE_DS', 'Não especificado'),
-                    "Sub-Especialidade": result.get('VSUES_DS', 'Não especificado'),
-                    "Data da Consulta": result.get('VAGEN_DT', 'Não especificado')
-                })
+                medico_id = result.get('VCOCL_CD', 'Não especificado')
+                if medico_id not in grouped_results:
+                    grouped_results[medico_id] = {
+                        "Unidade": unidade_mapping.get(unidade, {'nome': 'Desconhecido'})['nome'],
+                        "ID Médico": medico_id,
+                        "Nome do Médico": result.get('VCOCL_NM', 'Não especificado'),
+                        "Tipo de Consulta": result.get('VGPRO_DS', 'Consulta'),
+                        "Especialidade": result.get('VPRRE_DS', 'Não especificado'),
+                        "Sub-Especialidade": result.get('VSUES_DS', 'Não especificado'),
+                        "Datas Disponíveis": set()
+                    }
+                grouped_results[medico_id]["Datas Disponíveis"].add(
+                    result.get('VAGEN_DT', 'Não especificado')
+                )
+
+            # Convertendo conjuntos de datas para listas
+            for medico in grouped_results.values():
+                medico["Datas Disponíveis"] = list(medico["Datas Disponíveis"])
+
+            final_results = list(grouped_results.values())
             return Response({"data": final_results}, status=status.HTTP_200_OK)
             #return Response({"data": results}, status=status.HTTP_200_OK)        
         except paramiko.SSHException as e:
@@ -850,12 +863,6 @@ class BuscarHorario(APIView):
                 results[nome_medico]["Horários"].append(hora)  # Add only hour to the Horários list
 
         return {"data": list(results.values())}
-
-
-
-
-
-
 
 class RegistrarAgendamento(APIView):
     # app_agd.P_APP_AGENDAR
