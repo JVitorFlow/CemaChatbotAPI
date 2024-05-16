@@ -204,8 +204,12 @@ class ConvenioDetalhesView(BaseView):
             planos_query = f"""
             SET COLSEP '|'
             SELECT VPLAN_CD, VPLAN_DS, VSUP2_CD
-            FROM V_APP_CONV_PLAN
-            WHERE VCONV_CD = '{vconv_cd}';
+            FROM (
+                SELECT VPLAN_CD, VPLAN_DS, VSUP2_CD, 
+                    ROW_NUMBER() OVER (ORDER BY VPLAN_CD) AS row_num
+                FROM V_APP_CONV_PLAN
+                WHERE VCONV_CD = '{vconv_cd}'
+            ) WHERE row_num <= 3;
             """
             planos_response = self.query_database(custom_query=planos_query, column_names=["VPLAN_CD", "VPLAN_DS", "VSUP2_CD"])
             if planos_response.status_code != 200:
