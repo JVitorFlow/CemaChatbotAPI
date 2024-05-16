@@ -8,6 +8,7 @@ from .utils.ssh_utils import get_ssh_client
 import re
 import paramiko
 from datetime import datetime
+from django.http import JsonResponse
 import logging
 
 logger = logging.getLogger('django')
@@ -325,15 +326,28 @@ class BuscarConvenioView(BaseView):
             errors = stderr.read().decode('utf-8')
             if errors:
                 return {"error": errors}
+            
 
             output = stdout.read().decode('utf-8').strip()
-            data = {}
+            results = []
+            current_record = {}
             for line in output.split('\n'):
-                if ':' in line:
+                if '----- INICIO DOS REGISTROS -----' in line:
+                    continue  # Skip the start line
+                elif '----- FIM DOS REGISTROS -----' in line:
+                    if current_record:
+                        results.append(current_record)
+                        current_record = {}  # Reset for the next record
+                elif ':' in line:
                     key, value = line.split(':', 1)
-                    data[key.strip()] = value.strip()
-            return {"data": data}
+                    current_record[key.strip()] = value.strip()
+                if current_record and 'Produto' in line:  # Assuming 'Produto' is the last item in a record
+                    results.append(current_record)
+                    current_record = {}  # Reset after each complete record
 
+            if not results:
+                return {"message": "Nenhum registro encontrado."}
+            return {"data": results}
         finally:
             client.close()
 
@@ -453,7 +467,7 @@ class CadastrarNovoPaciente(APIView):
     parser_classes = [JSONParser]
     def post(self, request, *args, **kwargs):
         data = request.data
-        logger.info("Dados recebidos para cadastro:", data)
+        logger.info("Dados recebidos para cadastro")
         data_nascimento_formatada = datetime.strptime(data.get('Data de Nascimento'), '%d/%m/%Y').strftime('%Y-%m-%d')
         try:
             client = get_ssh_client(config('HOSTNAME'), config('SSH_PORT', cast=int), config('USERNAME_ORACLE'), config('PASSWORD'))
@@ -512,6 +526,8 @@ class CadastrarNovoPaciente(APIView):
             echo "{plsql_block}" | sqlplus -S {config('CONNECTION_STRING')}
             """)
 
+
+            print(plsql_block)
             output = stdout.read().decode('utf-8', errors='ignore').strip()
             errors = stderr.read().decode('utf-8', errors='ignore').strip()
 
@@ -1060,12 +1076,7 @@ class RealizarAgendamento(BaseView):
         hora_agenda = data.get('hora_agenda', 'Não especificado')
         minuto_agenda = data.get('minuto_agenda', 'Não especificado')
         cpf = data.get('cpf', 'Não especificado')
-        idade  = data.get('idade_paciente', 'Não especificado')
-        nome_paciente = data.get('nome_paciente', 'Não especificado')
-        genero_paciente = data.get('genero', 'Não especificado')
-        data_nascimento = data.get('data_nascimento', 'Não especificado')
-        telefone_paciente = data.get('telefone', 'Não especificado')
-        email = data.get('email', 'Não especificado')
+        
 
          # Converting data_consulta from string to datetime object
         try:
@@ -1073,16 +1084,6 @@ class RealizarAgendamento(BaseView):
             data_formatada = data_consulta_obj.strftime('%Y-%m-%d')
         except ValueError:
             return Response({"error": "Formato de data inválido. Use 'DD/MM/YYYY'."}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Converter data_nascimento de string para objeto datetime
-        try:
-            if data_nascimento != 'Não especificado':
-                data_nascimento_obj = datetime.strptime(data_nascimento, '%d/%m/%Y')
-                data_nascimento_formatada = data_nascimento_obj.strftime('%Y-%m-%d')
-            else:
-                data_nascimento_formatada = 'Não especificado'
-        except ValueError:
-            return Response({"error": "Formato de data de nascimento inválido. Use 'DD/MM/YYYY'."}, status=status.HTTP_400_BAD_REQUEST)
 
 
         if unidade not in unidade_mapping or especialidade not in especialidade_mapping:
@@ -1148,7 +1149,6 @@ class RealizarAgendamento(BaseView):
         logger.info(f'Codigo do subplano: {subplano_cd}')
 
         
-        
         try:            
             # Montagem do comando PL/SQL a ser executado
             plsql_command = f"""
@@ -1213,9 +1213,34 @@ class RealizarAgendamento(BaseView):
 
             if errors:
                 return Response({"error": errors}, status=status.HTTP_400_BAD_REQUEST)
+            
+            output = output.replace('C??digo', 'Código').strip()
+            clean_output = ' '.join(output.replace('\r', '').split())
 
-            return Response({"message": output}, status=status.HTTP_200_OK)
+            # Regex mais flexível para capturar partes variáveis do output
+            error_regex = re.compile(
+                r"Erro: (?P<error_desc>.+?) Und:(?P<unit>\w+)Crm:(?P<crm>\d+)-(?P<doctor_name>[^V]+?) V SASSO-(?P<date>\d{2}/\d{2}/\d{4}) Hr:(?P<time>\d{2}:\d{2}) Código de Erro: (?P<error_code>\d+) Código de Agendamento: (?P<agend_code>\d*)",
+                re.IGNORECASE | re.DOTALL
+            )
+            match = error_regex.search(clean_output)
 
+            if match:
+                data = match.groupdict()
+                data['agend_code'] = data['agend_code'] if data['agend_code'] else "0"  # Define '0' se vazio
+
+                response_data = {
+                    "Erro": data['error_desc'],
+                    "Unidade": data['unit'],
+                    "CRM": data['crm'],
+                    "Nome do Médico": data['doctor_name'].strip(),
+                    "Data Consulta": data['date'],
+                    "Horário Consulta": data['time'],
+                    "Código de Erro": data['error_code'],
+                    "Código de Agendamento": data['agend_code']
+                }
+                return JsonResponse(response_data, status=400)
+
+            return JsonResponse({"message": clean_output}, status=200)
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         finally:
@@ -1223,12 +1248,126 @@ class RealizarAgendamento(BaseView):
                 client.close()
 
 
-class CadastrarNovoConveio(APIView):
+class CadastrarNovoConveio(BaseView):
     # app_agd.GERA_PAC_BOT_CNV
-    pass
+    parser_classes = [JSONParser]
+
+    def query_database(self, custom_query=None, column_names=None):
+        return super().query_database(custom_query=custom_query, column_names=column_names)
 
 
-class SelecionarProfissional(APIView):
-    # app_agd.p_bc_get_doctors
-    pass
+    def post(self, request, *args, **kwargs):
+        data = request.data
+
+        descricao_convenio = data.get('convenio', 'Não especificado').upper()
+        descricao_plano = data.get('plano', 'Não especificado')
+        cpf = data.get('cpf', 'Não especificado')
+
+        # Obtem código do convenio atraves da descrição
+        convenio_query = f"""
+        SELECT VCONV_CD FROM V_APP_CONVENIO WHERE UPPER(VCONV_DS) = UPPER('{descricao_convenio}');
+        """
+        response = self.query_database(custom_query=convenio_query, column_names=["VCONV_CD"])
+
+        # Verificar se a resposta foi bem-sucedida
+        if response.status_code != 200:
+            return Response({"error": "Erro ao buscar convenio."}, status=response.status_code)
+
+        convenio_data = response.data.get('data', [])
+
+        if not convenio_data:
+            return Response({"error": f"Convenio {descricao_convenio} não encontrado"}, status=400)
+        
+        convenio_cd = convenio_data[0]['VCONV_CD']
+        logger.info(f"Convenio {descricao_convenio} tem codigo {convenio_cd}")
+
+        # Obter código do plano/subplano pelo código de convênio
+        plano_query = f"""
+        SET COLSEP '|'
+        SELECT VPLAN_CD, VSUP2_CD FROM V_APP_CONV_PLAN WHERE VCONV_CD = {convenio_cd} AND UPPER(VPLAN_DS) = UPPER('{descricao_plano}');
+        """
+        response = self.query_database(custom_query=plano_query, column_names=["VPLAN_CD", "VSUP2_CD"])
+        # Verificar se a resposta foi bem-sucedida
+        if response.status_code != 200:
+            return Response({"error": "Erro ao buscar plano."}, status=response.status_code)
+
+        plano_data = response.data.get('data', [])
+        
+        if not plano_data:
+            return Response({"error": f"Plano {descricao_plano} não encontrado"}, status=400)
+        
+        plano_cd = plano_data[0]['VPLAN_CD']
+        logger.info(f'Codigo do plano {descricao_plano}: {plano_cd}')
+
+        try:            
+            # Montagem do comando PL/SQL a ser executado
+            plsql_command = f"""           
+            SET SERVEROUTPUT ON SIZE UNLIMITED;
+
+            DECLARE
+            p_erro BOOLEAN := FALSE;
+            p_erro_cd NUMBER;
+            p_erro_mt VARCHAR2(4000);
+            p_apbc_cd NUMBER;
+            p_origem VARCHAR2(2) := 'C';
+            p_tp_conv VARCHAR2(2) := 'C';
+            p_conv_cd NUMBER := {convenio_cd};
+            p_pla2_cd NUMBER := {plano_cd};
+            p_sup2_cd VARCHAR2(2) := '*';
+            p_patient_id NUMBER := {cpf};
+
+            BEGIN
+            app_agd.GERA_PAC_BOT_CNV(
+                P_ERRO          => p_erro,
+                P_ERRO_CD       => p_erro_cd,
+                P_ERRO_MT       => p_erro_mt,
+                P_APBC_CD       => p_apbc_cd,
+                P_ORIGEM        => p_origem,
+                P_TP_CONV       => p_tp_conv,
+                P_CONV_CD       => p_conv_cd,
+                P_PLA2_CD       => p_pla2_cd,
+                P_SUP2_CD       => p_sup2_cd,
+                P_PATIENT_ID    => p_patient_id
+            );
+
+            IF p_erro THEN
+                DBMS_OUTPUT.PUT_LINE('Erro: ' || TO_CHAR(p_erro_cd) || ' - ' || p_erro_mt);
+            ELSE
+                IF p_apbc_cd > 0 THEN
+                DBMS_OUTPUT.PUT_LINE('Cadastro de convenio realizado com sucesso. Codigo gerado: ' || p_apbc_cd);
+                ELSE
+                DBMS_OUTPUT.PUT_LINE('Procedimento completado sem erros, mas não foi gerado um código válido.');
+                END IF;
+            END IF;
+            END;
+            /
+            """
+
+            client = get_ssh_client(config('HOSTNAME'), config('SSH_PORT', cast=int), config('USERNAME_ORACLE'), config('PASSWORD'))
+            stdin, stdout, stderr = client.exec_command(f"""
+            export LD_LIBRARY_PATH={config('SQLPLUS_PATH')}:$LD_LIBRARY_PATH
+            export PATH={config('SQLPLUS_PATH')}:$PATH
+            echo "{plsql_command}" | sqlplus -S {config('CONNECTION_STRING')}
+            """)
+
+            output = stdout.read().decode().strip()
+            errors = stderr.read().decode().strip()
+
+            if errors:
+                return Response({"error": errors}, status=status.HTTP_400_BAD_REQUEST)
+
+            
+            # Clean up the output message more aggressively
+            cleaned_output = re.sub(r'PL/SQL procedure successfully completed.', '', output)
+            cleaned_output = re.sub(r'\n+', ' ', cleaned_output)  # Remove multiple newlines
+            cleaned_output = cleaned_output.strip()
+
+
+            return Response({"message": cleaned_output}, status=status.HTTP_200_OK)   
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        finally:
+            if client:
+                client.close()
+
 
