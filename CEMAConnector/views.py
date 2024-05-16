@@ -95,15 +95,76 @@ class BaseView(APIView):
         except paramiko.SSHException as e:
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+
 class SubespView(BaseView):
-    column_names = ['VGPRO_CD', 'VGPRO_DS', 'VPRRE_CD', 'VPRRE_DS', 'VSUES_CD', 'VSUES_DS', 'VVOX', 'VTODOS']
-    table_name = 'v_app_subesp'
+    parser_classes = [JSONParser]
 
     def post(self, request, format=None):
-        return self.query_database(self.table_name, self.column_names, request)
+        subespecialidade = request.data.get('subespecialidade', '').strip()
+
+        if subespecialidade:
+            where_clause = f"UPPER(VSUES_DS) LIKE '%{subespecialidade.upper()}%'"
+            order_by = "ORDER BY VSUES_DS, VPRRE_DS"  # Agora também ordenando por especialidade
+
+            # Verificar se a subespecialidade existe
+            check_query = f"""
+            SET LINESIZE 32767
+            SET PAGESIZE 50000
+            SET COLSEP '|'
+            SET TRIMSPOOL ON
+            SET WRAP OFF
+            SELECT COUNT(*) AS COUNT
+            FROM v_app_subesp
+            WHERE UPPER(VSUES_DS) = UPPER('{subespecialidade}');
+            """
+
+            check_response = self.query_database(custom_query=check_query, column_names=["COUNT"])
+            if check_response.status_code != 200:
+                return Response({"error": "Falha ao buscar dados", "details": check_response.data}, status=check_response.status_code)
+
+            count_data = check_response.data.get('data', [])
+            if not count_data or int(count_data[0]['COUNT']) == 0:
+                return Response({"message": f"Subespecialidade '{subespecialidade}' não encontrada."}, status=status.HTTP_404_NOT_FOUND)
+
+        else:
+            # Lista de subespecialidades sugeridas
+            sugestoes = [
+                'GLAUCOMA', 'CATARATA', 'RETINA', 'ESTRABISMO', 'CORNEA CIRURGICO',
+                'MIOPIA / REFRATIVA', 'VITRECTOMIA', 'PROTESE OCULAR', 'ALERGIA OCULAR',
+                'BLEFARITE', 'OLHOS SECOS', 'PLASTICA OCULAR', 'CERATOCONE',
+                'TRANSPLANTE CORNEA', 'LENTE DE CONTATO'
+            ]
+            subespecialidades_sugeridas = ', '.join(f"'{sub}'" for sub in sugestoes)
+            where_clause = f"VSUES_DS IN ({subespecialidades_sugeridas})"
+            order_by = "ORDER BY VPRRE_DS, VSUES_DS"  # Priorizar ordenação por especialidade quando sugestões forem usadas
+
+        subesp_query = f"""
+        SET LINESIZE 32767
+        SET PAGESIZE 50000
+        SET COLSEP '|'
+        SET TRIMSPOOL ON
+        SET WRAP OFF
+        SELECT VSUES_CD, VSUES_DS, VPRRE_DS
+        FROM (
+            SELECT VSUES_CD, VSUES_DS, VPRRE_DS,
+                   ROW_NUMBER() OVER (PARTITION BY VPRRE_DS, VSUES_DS ORDER BY VPRRE_DS, VSUES_DS) AS rn
+            FROM v_app_subesp
+            WHERE {where_clause}
+        )
+        WHERE rn <= 3
+        {order_by};
+        """
+
+        response = self.query_database(custom_query=subesp_query, column_names=["VSUES_CD", "VSUES_DS", "VPRRE_DS"])
+        if response.status_code != 200:
+            return Response({"error": "Falha ao buscar dados", "details": response.data}, status=response.status_code)
+
+        subespecialidades = response.data.get('data', [])
+
+        return Response({"data": subespecialidades}, status=status.HTTP_200_OK)
+
 
 class UnidView(BaseView):
-
     parser_classes = [JSONParser]
 
     column_names = ['VUNID_CD', 'VUNID_DS', 'VLOGRADOURO', 'VNR', 'VCOMPL', 'VBAIRRO', 'VCIDADE', 'VCEP', 'VUF', 'VDDD', 'VTEL', 'VRAMAL', 'VUNID_APRES', 'VUNID_LOCAL']
@@ -114,10 +175,33 @@ class UnidView(BaseView):
 
         if unidade:
             where_clause = f"UPPER(VUNID_DS) LIKE '%{unidade.upper()}%'"
-            order_by = "ORDER BY VUNID_DS"  # Ordenar por descrição da unidade
+            order_by = "ORDER BY VUNID_DS"
+
+            # Verificar se a unidade existe
+            check_query = f"""
+            SET LINESIZE 32767
+            SET PAGESIZE 50000
+            SET COLSEP '|'
+            SET TRIMSPOOL ON
+            SET WRAP OFF
+            SELECT COUNT(*) AS COUNT
+            FROM {self.table_name}
+            WHERE UPPER(VUNID_DS) = UPPER('{unidade}');
+            """
+
+            check_response = self.query_database(custom_query=check_query, column_names=["COUNT"])
+            if check_response.status_code != 200:
+                return Response({"error": "Falha ao buscar dados", "details": check_response.data}, status=check_response.status_code)
+
+            count_data = check_response.data.get('data', [])
+            if not count_data or int(count_data[0]['COUNT']) == 0:
+                return Response({"message": f"Unidade '{unidade}' não encontrada."}, status=status.HTTP_404_NOT_FOUND)
         else:
-            where_clause = "VUNID_DS IN ('BELEM', 'ITAQUERA', 'ARICANDUVA')"
-            order_by = "ORDER BY VUNID_DS"  # Ordenar por unidades especificadas
+            # Lista de unidades sugeridas
+            sugestoes = ['BELEM', 'ITAQUERA', 'ARICANDUVA']
+            unidades_sugeridas = ', '.join(f"'{unid}'" for unid in sugestoes)
+            where_clause = f"VUNID_DS IN ({unidades_sugeridas})"
+            order_by = "ORDER BY VUNID_DS"
 
         unid_query = f"""
         SET LINESIZE 32767
@@ -137,8 +221,7 @@ class UnidView(BaseView):
         """
 
         logger.info(f"Executando consulta {unid_query}")
-        # Executa a consulta no banco de dados
-        unid_response = self.query_database(custom_query=unid_query, column_names=["VUNID_CD", "VUNID_DS", "VLOGRADOURO", "VNR", "VCOMPL", "VBAIRRO", "VCIDADE", "VCEP", "VUF", "VDDD", "VTEL", "VRAMAL", "VUNID_APRES", "VUNID_LOCAL",])
+        unid_response = self.query_database(custom_query=unid_query, column_names=self.column_names)
         if unid_response.status_code != 200:
             return unid_response
 
@@ -173,10 +256,27 @@ class ConvenioDetalhesView(BaseView):
 
         if descricao:
             where_clause = f"UPPER(VCONV_DS) LIKE '%{descricao.upper()}%'"
-            order_by = "ORDER BY VCONV_DS"  # ordenar por descrição quando a busca é feita por descrição
+            order_by = "ORDER BY VCONV_DS"
+
+            # Verificar se o convênio existe
+            check_query = f"""
+            SET COLSEP '|'
+            SELECT COUNT(*) AS COUNT
+            FROM V_APP_CONVENIO
+            WHERE UPPER(VCONV_DS) = UPPER('{descricao}');
+            """
+
+            check_response = self.query_database(custom_query=check_query, column_names=["COUNT"])
+            if check_response.status_code != 200:
+                return Response({"error": "Falha ao buscar dados", "details": check_response.data}, status=check_response.status_code)
+
+            count_data = check_response.data.get('data', [])
+            if not count_data or int(count_data[0]['COUNT']) == 0:
+                return Response({"message": f"Convênio '{descricao}' não encontrado."}, status=status.HTTP_404_NOT_FOUND)
         else:
+            # Lista de unidades sugeridas
             where_clause = "VUNID_DS IN ('BELEM', 'ITAQUERA', 'ARICANDUVA')"
-            order_by = "ORDER BY VUNID_DS, VCONV_DS"  # ordenar por unidade e descrição para agrupar corretamente
+            order_by = "ORDER BY VUNID_DS, VCONV_DS"
 
         convenios_query = f"""
         SET COLSEP '|'
@@ -191,13 +291,11 @@ class ConvenioDetalhesView(BaseView):
         {order_by if descricao else ''};
         """
 
-        # Executa a consulta no banco de dados via SSH
         convenios_response = self.query_database(custom_query=convenios_query, column_names=["VCONV_CD", "VCONV_DS", "VREGANS", "VUNID_CD", "VUNID_DS"])
         if convenios_response.status_code != 200:
             return convenios_response
 
         convenios = convenios_response.data.get('data', [])
-        # Itera pelos convênios para buscar os planos relacionados
         resultado = []
         for convenio in convenios:
             vconv_cd = convenio['VCONV_CD']
@@ -220,6 +318,7 @@ class ConvenioDetalhesView(BaseView):
             resultado.append(convenio)
 
         return Response({"data": resultado}, status=status.HTTP_200_OK)
+
 
 
 # Busca convênio do paciente consultando CPF 
@@ -362,7 +461,7 @@ class BuscarPacienteView(APIView):
     def post(self, request, format=None):
         patient_phone = request.data.get('patient_phone')
         if not patient_phone:
-            return Response({"error": "O número de telefone do paciente é obrigatório"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": "O número de telefone do paciente é obrigatório"}, status=status.HTTP_200_OK)
 
         logger.info("Paciente_phone recebido:", patient_phone)  # Debugging
 
@@ -372,7 +471,7 @@ class BuscarPacienteView(APIView):
         if 'error' in paciente:
             return Response({"error": paciente['error']}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         elif not data_paciente:
-            return Response({"message": "Paciente não cadastrado."}, status=status.HTTP_404_NOT_FOUND)
+            return Response({"message": "Paciente não cadastrado."}, status=status.HTTP_200_OK)
         
         return Response({
             "paciente": data_paciente
@@ -768,6 +867,10 @@ class BuscarDataDisponivel(APIView):
             if current_data:  # Adicionar o último registro se houver
                 results.append(current_data)
 
+            if not results:
+                return Response({"message": "Nenhuma data disponível encontrada."}, status=status.HTTP_404_NOT_FOUND)
+
+
             # Agrupar resultados por médico
             grouped_results = {}
             for result in results:
@@ -775,7 +878,7 @@ class BuscarDataDisponivel(APIView):
                 if medico_id not in grouped_results:
                     grouped_results[medico_id] = {
                         "Unidade": unidade_mapping.get(unidade, {'nome': 'Desconhecido'})['nome'],
-                        "ID Médico": medico_id,
+                        "CRM Médico": medico_id,
                         "Nome do Médico": result.get('VCOCL_NM', 'Não especificado'),
                         "Tipo de Consulta": result.get('VGPRO_DS', 'Consulta'),
                         "Especialidade": result.get('VPRRE_DS', 'Não especificado'),
@@ -843,7 +946,7 @@ class BuscarHorario(BaseView):
         }
 
 
-        id_medico = data.get('id_medico', 'NULL')
+        crm_medico = data.get('crm_medico', 'NULL')
         unidade = data.get('unidade', '').upper()
         vprre_codigo = 1 # consulta
         especialidade = data.get('especialidade', '').upper()
@@ -884,10 +987,10 @@ class BuscarHorario(BaseView):
         subespecialidade_cd = subespecialidade_data[0]['VSUES_CD']
         logger.info(f"subespecialidade {sub_especialidade} tem código {subespecialidade_cd}")
         
-        if id_medico:
-            id_medico_clause = f"p_vcocd_cd NUMBER := {id_medico}"
+        if crm_medico:
+            crm_medico_clause = f"p_vcocd_cd NUMBER := {crm_medico}"
         else:
-            id_medico_clause = "p_vcocd_cd NUMBER := NULL"
+            crm_medico_clause = "p_vcocd_cd NUMBER := NULL"
         # Estabelece conexão SSH e executa o bloco PL/SQL
         try:
             
@@ -899,7 +1002,7 @@ class BuscarHorario(BaseView):
                 p_erro_cd NUMBER;
                 p_erro_mt VARCHAR2(4000);
                 p_recordset SYS_REFCURSOR;
-                {id_medico_clause};
+                {crm_medico_clause};
                 p_vunid_cd NUMBER := {unidade_codigo}; 
                 p_vgpro_cd NUMBER := {vprre_codigo};
                 p_vprre_cd NUMBER := {especialidade_codigo};
