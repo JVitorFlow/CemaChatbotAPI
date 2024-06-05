@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.urls import path
-from CEMAConnector.views import SubespView, UnidView, EspecialidadeBasica, ConvenioDetalhesView, PlanosDisponiveis, BuscarConvenioView, BuscarPacienteView, CadastrarNovoPaciente, BuscarDataDisponivel, BuscarHorario, RealizarAgendamento, CadastrarNovoConveio
+from CEMAConnector.views import SubespView, UnidView, EspecialidadeBasica, ConvenioDetalhesView, PlanosDisponiveis, BuscarConvenioView, BuscarPacienteView, CadastrarNovoPaciente, BuscarDataDisponivel, BuscarHorario, RealizarAgendamento, CadastrarNovoConveio, CancelarConsultaView, VerConsultasFuturasView
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -16,5 +16,6 @@ urlpatterns = [
     path('api/buscarhorario/', BuscarHorario.as_view(), name='buscar-horario-disponivel'),
     path('api/registrar-agendamento/', RealizarAgendamento.as_view(), name='realizar-agendamento'),
     path('api/cadastro-convenio/', CadastrarNovoConveio.as_view(), name='cadastrar-convenio'),
-
+    path('api/cancelar-consulta/', CancelarConsultaView.as_view(), name='cancelar-consulta'),
+    path('api/ver-consultas-futuras/', VerConsultasFuturasView.as_view(), name='ver-consultas-futuras'),
 ]

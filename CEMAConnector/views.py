@@ -115,16 +115,17 @@ class SubespView(BaseView):
             SET WRAP OFF
             SELECT COUNT(*) AS COUNT
             FROM v_app_subesp
-            WHERE UPPER(VSUES_DS) = UPPER('{subespecialidade}');
+            WHERE {where_clause};
             """
+            # print(check_query)
 
             check_response = self.query_database(custom_query=check_query, column_names=["COUNT"])
             if check_response.status_code != 200:
-                return Response({"error": "Falha ao buscar dados", "details": check_response.data}, status=check_response.status_code)
+                return Response({"data": "Falha ao buscar dados", "details": check_response.data}, status=check_response.status_code)
 
             count_data = check_response.data.get('data', [])
             if not count_data or int(count_data[0]['COUNT']) == 0:
-                return Response({"message": f"Subespecialidade '{subespecialidade}' não encontrada."}, status=status.HTTP_404_NOT_FOUND)
+                return Response({"data": f"Subespecialidade '{subespecialidade}' não encontrada."}, status=status.HTTP_404_NOT_FOUND)
 
         else:
             # Lista de subespecialidades sugeridas
@@ -195,7 +196,7 @@ class UnidView(BaseView):
 
             count_data = check_response.data.get('data', [])
             if not count_data or int(count_data[0]['COUNT']) == 0:
-                return Response({"message": f"Unidade '{unidade}' não encontrada."}, status=status.HTTP_404_NOT_FOUND)
+                return Response({"data": f"Unidade '{unidade}' não encontrada."}, status=status.HTTP_404_NOT_FOUND)
         else:
             # Lista de unidades sugeridas
             sugestoes = ['BELEM', 'ITAQUERA', 'ARICANDUVA']
@@ -247,36 +248,49 @@ class PlanosDisponiveis(BaseView):
     
 # Pesquisar convenios disponiveis
 class ConvenioDetalhesView(BaseView):
-
-    def query_database(self, custom_query=None, column_names=None):
-        return super().query_database(custom_query=custom_query, column_names=column_names)
+    parser_classes = [JSONParser]
 
     def post(self, request):
         descricao = request.data.get('descricao', '').strip()
+        unidade = request.data.get('unidade', '').strip()
 
+        if not unidade:
+            return Response({"data": "A unidade é obrigatória"}, status=status.HTTP_400_BAD_REQUEST)
+
+        convenios = self.buscar_convenio(unidade, descricao)
+        if 'error' in convenios:
+            return Response({"data": convenios['error']}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        if 'message' in convenios:
+            return Response({"data": convenios['message']}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response({"data": convenios}, status=status.HTTP_200_OK)
+    
+    def buscar_convenio(self, unidade, descricao):
+        where_clause = f"UPPER(VUNID_DS) LIKE '%{unidade.upper()}%'"
         if descricao:
-            where_clause = f"UPPER(VCONV_DS) LIKE '%{descricao.upper()}%'"
-            order_by = "ORDER BY VCONV_DS"
+            where_clause += f" AND UPPER(VCONV_DS) LIKE '%{descricao.upper()}%'"
 
-            # Verificar se o convênio existe
-            check_query = f"""
-            SET COLSEP '|'
-            SELECT COUNT(*) AS COUNT
-            FROM V_APP_CONVENIO
-            WHERE UPPER(VCONV_DS) = UPPER('{descricao}');
-            """
+        # Verificar se a unidade e opcionalmente o convênio existem
+        check_query = f"""
+        SET COLSEP '|'
+        SELECT COUNT(*) AS COUNT
+        FROM V_APP_CONVENIO
+        WHERE {where_clause};
+        """
+        # print("Check convenios query:", check_query)
+        check_response = self.query_database(custom_query=check_query, column_names=["COUNT"])
+        if check_response.status_code != 200:
+            return {"error": "Falha ao buscar dados", "details": check_response.data}
 
-            check_response = self.query_database(custom_query=check_query, column_names=["COUNT"])
-            if check_response.status_code != 200:
-                return Response({"error": "Falha ao buscar dados", "details": check_response.data}, status=check_response.status_code)
+        count_data = check_response.data.get('data', [])
+        if not count_data or int(count_data[0]['COUNT']) == 0:
+            if descricao:
+                return {"message": f"Convênio '{descricao}' na unidade '{unidade}' não encontrado."}
+            else:
+                return {"message": f"Unidade '{unidade}' não encontrada."}
 
-            count_data = check_response.data.get('data', [])
-            if not count_data or int(count_data[0]['COUNT']) == 0:
-                return Response({"message": f"Convênio '{descricao}' não encontrado."}, status=status.HTTP_404_NOT_FOUND)
-        else:
-            # Lista de unidades sugeridas
-            where_clause = "VUNID_DS IN ('BELEM', 'ITAQUERA', 'ARICANDUVA')"
-            order_by = "ORDER BY VUNID_DS, VCONV_DS"
+        # Lista de convenios que tem na unidade escolhida máximo 3
+        order_by = "ORDER BY VUNID_DS, VCONV_DS"
 
         convenios_query = f"""
         SET COLSEP '|'
@@ -288,14 +302,20 @@ class ConvenioDetalhesView(BaseView):
             WHERE {where_clause}
         )
         WHERE rn <= 3
-        {order_by if descricao else ''};
+        {order_by};
         """
-
+        # print("Convenios query:", convenios_query)
         convenios_response = self.query_database(custom_query=convenios_query, column_names=["VCONV_CD", "VCONV_DS", "VREGANS", "VUNID_CD", "VUNID_DS"])
         if convenios_response.status_code != 200:
-            return convenios_response
+            return {"error": "Falha ao buscar dados", "details": convenios_response.data}
 
         convenios = convenios_response.data.get('data', [])
+        if not convenios:
+            if descricao:
+                return {"message": f"Convênio '{descricao}' na unidade '{unidade}' não encontrado."}
+            else:
+                return {"message": f"Unidade '{unidade}' não encontrada."}
+
         resultado = []
         for convenio in convenios:
             vconv_cd = convenio['VCONV_CD']
@@ -309,15 +329,19 @@ class ConvenioDetalhesView(BaseView):
                 WHERE VCONV_CD = '{vconv_cd}'
             ) WHERE row_num <= 3;
             """
+            # print("Planos query para VCONV_CD:", vconv_cd, "é", planos_query)
             planos_response = self.query_database(custom_query=planos_query, column_names=["VPLAN_CD", "VPLAN_DS", "VSUP2_CD"])
             if planos_response.status_code != 200:
-                return planos_response
-            
+                return {"error": "Falha ao buscar dados", "details": planos_response.data}
+
             planos = planos_response.data.get('data', [])
-            convenio['planos'] = planos
+            if planos:
+                convenio['planos'] = planos
+            else:
+                convenio['planos'] = []
             resultado.append(convenio)
 
-        return Response({"data": resultado}, status=status.HTTP_200_OK)
+        return resultado
 
 
 
@@ -327,11 +351,12 @@ class BuscarConvenioView(BaseView):
 
     def post(self, request, format=None):
         cpf = request.data.get('cpf')
+        
         if not cpf:
-            return Response({"error": "CPF não fornecido"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": "CPF não fornecido"}, status=status.HTTP_200_OK)
 
         if not self.validar_cpf(cpf):
-            return Response({"error": "CPF inválido"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": "CPF inválido"}, status=status.HTTP_200_OK)
 
         logger.info(f"CPF recebido: {cpf}")
         data = self.buscar_convenio(cpf)
@@ -461,20 +486,26 @@ class BuscarPacienteView(APIView):
     def post(self, request, format=None):
         patient_phone = request.data.get('patient_phone')
         if not patient_phone:
-            return Response({"error": "O número de telefone do paciente é obrigatório"}, status=status.HTTP_200_OK)
+            return Response({"data": "O número de telefone do paciente é obrigatório"}, status=status.HTTP_400_BAD_REQUEST)
+        
 
-        logger.info("Paciente_phone recebido:", patient_phone)  # Debugging
+        # Remove o código do país se presente
+        if patient_phone.startswith('55'):
+            patient_phone = patient_phone[2:].strip()
+
+        # Remover qualquer possível espaço ou hífen que possa ter sido deixado
+        patient_phone = patient_phone.replace(' ', '').replace('-', '')
 
         paciente, data_paciente = self.verificar_paciente(patient_phone)
         if paciente is None:
-            return Response({"error": "Erro ao verificar paciente"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"data": "Erro ao verificar paciente"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         if 'error' in paciente:
-            return Response({"error": paciente['error']}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"data": paciente['error']}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         elif not data_paciente:
-            return Response({"message": "Paciente não cadastrado."}, status=status.HTTP_200_OK)
+            return Response({"data": "Paciente não cadastrado."}, status=status.HTTP_200_OK)
         
         return Response({
-            "paciente": data_paciente
+            "data": data_paciente
         }, status=status.HTTP_200_OK)
 
     def verificar_paciente(self, patient_phone):
@@ -543,6 +574,7 @@ class BuscarPacienteView(APIView):
                 export PATH={config('SQLPLUS_PATH')}:$PATH
                 echo "{plsql_block}" | sqlplus -S {config('CONNECTION_STRING')}
                 """)
+                # print(plsql_block)
                 errors = stderr.read().decode('utf-8')
                 if errors:
                     return {"error": errors}, None
@@ -570,8 +602,16 @@ class CadastrarNovoPaciente(APIView):
     parser_classes = [JSONParser]
     def post(self, request, *args, **kwargs):
         data = request.data
-        logger.info("Dados recebidos para cadastro")
+        telefone = request.data.get('telefone')
+
         data_nascimento_formatada = datetime.strptime(data.get('Data de Nascimento'), '%d/%m/%Y').strftime('%Y-%m-%d')
+
+        # Remove o código do país se presente
+        if telefone.startswith('55'):
+            telefone = telefone[2:].strip()
+
+        # Remover qualquer possível espaço ou hífen que possa ter sido deixado
+        telefone = telefone.replace(' ', '').replace('-', '')
         try:
             client = get_ssh_client(config('HOSTNAME'), config('SSH_PORT', cast=int), config('USERNAME_ORACLE'), config('PASSWORD'))
             plsql_block = f"""
@@ -587,7 +627,7 @@ class CadastrarNovoPaciente(APIView):
                 p_patient_name VARCHAR2(100) := '{data.get('Nome')} {data.get('Sobrenome')}';
                 p_patient_gender VARCHAR2(1) := '{data.get('Sexo')}';
                 p_patient_date_of_birth DATE := TO_DATE('{data_nascimento_formatada}', 'YYYY-MM-DD');
-                p_patient_phone VARCHAR2(100) := '{data.get('telefone')}';
+                p_patient_phone VARCHAR2(100) := '{telefone}';
                 p_patient_email VARCHAR2(100) := '{data.get('Email')}';
                 p_patient_cpf VARCHAR2(100) := '{data.get('CPF')}';
             BEGIN
@@ -630,7 +670,7 @@ class CadastrarNovoPaciente(APIView):
             """)
 
 
-            print(plsql_block)
+            # print(plsql_block)
             output = stdout.read().decode('utf-8', errors='ignore').strip()
             errors = stderr.read().decode('utf-8', errors='ignore').strip()
 
@@ -644,17 +684,17 @@ class CadastrarNovoPaciente(APIView):
                 match = re.search(r'Código BOT gerado: (\d+)', output)
                 if match:
                     codigo_bot = match.group(1)
-                    return Response({"message": "Cadastro de paciente realizado com sucesso.", "codigo": codigo_bot}, status=status.HTTP_200_OK)
+                    return Response({"data": "Cadastro de paciente realizado com sucesso.", "codigo": codigo_bot}, status=status.HTTP_200_OK)
                 else:
-                    return Response({"message": "Cadastro de paciente realizado com sucesso.", "output": output.replace('\n', ' ')}, status=status.HTTP_200_OK)
+                    return Response({"data": "Cadastro de paciente realizado com sucesso.", "output": output.replace('\n', ' ')}, status=status.HTTP_200_OK)
             else:
-                return Response({"message": "Resposta não reconhecida.", "output": output.replace('\n', ' ')}, status=status.HTTP_200_OK)
+                return Response({"data": "Resposta não reconhecida.", "output": output.replace('\n', ' ')}, status=status.HTTP_200_OK)
         except paramiko.SSHException as e:
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         finally:
             client.close()
 
-class BuscarDataDisponivel(APIView):
+class BuscarDataDisponivel(BaseView):
     # app_agd.p_get_date_crm
     """
     COnfirma disponibilidade do médico na data informada
@@ -724,23 +764,43 @@ class BuscarDataDisponivel(APIView):
 
         unidade = data.get('unidade', '').upper()
         especialidade = data.get('especialidade', '').upper()
+        subespecialidade = data.get('subespecialidade', '').upper()
         data_consulta = data.get('data_consulta', datetime.now().strftime('%d/%m/%Y'))
 
         if unidade not in unidade_mapping or especialidade not in especialidade_mapping:
-            return Response({"error": "Unidade ou especialidade inválido."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"data": "Unidade ou especialidade inválido."}, status=status.HTTP_400_BAD_REQUEST)
 
 
         unidade_codigo = unidade_mapping[unidade]['codigo']
         especialidade_codigo = especialidade_mapping[especialidade]['codigo']
 
 
+        subespecialidade_query = f"""
+        SELECT VSUES_CD FROM v_app_subesp WHERE UPPER(VSUES_DS) = UPPER('{subespecialidade}');
+        """
+
+        response = self.query_database(custom_query=subespecialidade_query, column_names=["VSUES_CD"])
+
+        # Verificar se a resposta foi bem-sucedida
+        if response.status_code != 200:
+            return Response({"error": "Erro ao buscar subespecialidade."}, status=response.status_code)
+
+        subespecialidade_data = response.data.get('data', [])
+        # Verificar se dados foram encontrados
+        if not subespecialidade_data:
+            return Response({"error": f"Subespecialidade '{subespecialidade}' não encontrada."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Acessar o código da subespecialidade
+        subespecialidade_cd = subespecialidade_data[0]['VSUES_CD']
+        # print(f"subespecialidade {subespecialidade} tem código {subespecialidade_cd}")
+
         try:
             data_consulta_obj = datetime.strptime(data_consulta, '%d/%m/%Y')
             if data_consulta_obj.date() < datetime.now().date():
-                return Response({"error": "Data de consulta inválida ou anterior à data atual."}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"data": "Data de consulta inválida ou anterior à data atual."}, status=status.HTTP_400_BAD_REQUEST)
             data_formatada = data_consulta_obj.strftime('%Y-%m-%d')
         except ValueError:
-            return Response({"error": "Formato de data inválido. Use 'DD/MM/YYYY'."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"data": "Formato de data inválido. Use 'DD/MM/YYYY'."}, status=status.HTTP_400_BAD_REQUEST)
         
 
         plsql_block = f"""
@@ -755,7 +815,7 @@ class BuscarDataDisponivel(APIView):
             p_vunid_cd NUMBER := {unidade_codigo};
             p_vgpro_cd NUMBER := 1;
             p_vprre_cd NUMBER := {especialidade_codigo};
-            p_vsues_cd NUMBER := NULL;
+            p_vsues_cd NUMBER := {subespecialidade_cd};
             p_vdt DATE := TO_DATE('{data_formatada}', 'YYYY-MM-DD');
             p_vdt_fim DATE := NULL;
             p_vcocl_cd NUMBER := NULL;
@@ -843,6 +903,8 @@ class BuscarDataDisponivel(APIView):
             export PATH={config('SQLPLUS_PATH')}:$PATH
             echo "{plsql_block}" | sqlplus -S {config('CONNECTION_STRING')}
             """)
+
+            # print(plsql_block)
             
             errors = stderr.read().decode('utf-8')
             if errors:
@@ -868,7 +930,7 @@ class BuscarDataDisponivel(APIView):
                 results.append(current_data)
 
             if not results:
-                return Response({"message": "Nenhuma data disponível encontrada."}, status=status.HTTP_404_NOT_FOUND)
+                return Response({"data": "Nenhuma data disponível encontrada."}, status=status.HTTP_404_NOT_FOUND)
 
 
             # Agrupar resultados por médico
@@ -1082,6 +1144,7 @@ class BuscarHorario(BaseView):
             END;
             /
             """
+            # print(plsql_block)
             client = get_ssh_client(config('HOSTNAME'), config('SSH_PORT', cast=int), config('USERNAME_ORACLE'), config('PASSWORD'))
             stdin, stdout, stderr = client.exec_command(f"""
             export LD_LIBRARY_PATH={config('SQLPLUS_PATH')}:$LD_LIBRARY_PATH
@@ -1099,46 +1162,53 @@ class BuscarHorario(BaseView):
             
             results = self.parse_output(output)
             if not results:
-                return Response({"message": "Nenhum horário disponível para os critérios selecionados."}, status=status.HTTP_200_OK)
+                return Response({"data": "Nenhum horário disponível para os critérios selecionados."}, status=status.HTTP_200_OK)
 
-            return Response({"data": results}, status=status.HTTP_200_OK)
+            return Response({"data": results}, status=status.HTTP_200_OK)  # Retorna diretamente os resultados
         except paramiko.SSHException as e:
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         finally:
             client.close()
 
     def parse_output(self, output):
-        results = {}
-        nome_medico = None  # Variável para manter o nome do médico atual
-        data_found = False  # Flag para verificar se alguma data válida foi encontrada
+        results = []
+        current_medico = None
+        medico_map = {}
 
         lines = output.split('\n')
         for line in lines:
             if 'Unidade' in line and 'DS:' in line:
                 unidade = line.split('DS: ')[1].strip()
-                data_found = True  # Ajusta a flag quando um registro válido começa
+                if unidade not in medico_map:
+                    medico_map[unidade] = {}
             elif 'Codigo Local CD' in line and 'NM:' in line:
                 nome_medico = line.split('NM: ')[1].strip()
-                if nome_medico not in results:
-                    results[nome_medico] = {
-                        "Unidade": unidade,
+                if unidade not in medico_map:
+                    medico_map[unidade] = {}
+                if nome_medico not in medico_map[unidade]:
+                    medico_map[unidade][nome_medico] = {
                         "Nome Médico": nome_medico,
+                        "Unidade": unidade,
                         "Horários": [],
-                        "Data Agendamento": None
+                        "Data Agendamento": ""
                     }
+                current_medico = medico_map[unidade][nome_medico]
             elif 'Data Agendamento' in line:
                 data_agendamento = line.split(': ')[1].strip()
-                if nome_medico:
-                    results[nome_medico]["Data Agendamento"] = data_agendamento
+                current_medico["Data Agendamento"] = data_agendamento
             elif 'Hora HH' in line:
                 hora = line.split(': ')[1].strip()
-                if nome_medico:
-                    results[nome_medico]["Horários"].append(hora)
+                current_medico["Horários"].append(hora)
 
-        if not data_found:  # Se não encontrou nenhum registro válido
-            return {"message": "Nenhum horário disponível para os critérios selecionados."}
-        else:
-            return {"data": list(results.values())}
+        for unidade in medico_map:
+            for medico in medico_map[unidade]:
+                results.append(medico_map[unidade][medico])
+
+        if not results:
+            return {"data": "Nenhum horário disponível para os critérios selecionados."}
+
+        return results
+
 
 
 class RealizarAgendamento(BaseView):
@@ -1190,11 +1260,11 @@ class RealizarAgendamento(BaseView):
             data_consulta_obj = datetime.strptime(data_consulta, '%d/%m/%Y')
             data_formatada = data_consulta_obj.strftime('%Y-%m-%d')
         except ValueError:
-            return Response({"error": "Formato de data inválido. Use 'DD/MM/YYYY'."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"data": "Formato de data inválido. Use 'DD/MM/YYYY'."}, status=status.HTTP_400_BAD_REQUEST)
 
 
         if unidade not in unidade_mapping or especialidade not in especialidade_mapping:
-            return Response({"error": "Unidade ou especialidade inválido."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"data": "Unidade ou especialidade inválido."}, status=status.HTTP_400_BAD_REQUEST)
 
         unidade_codigo = unidade_mapping[unidade]['codigo']
         especialidade_codigo = especialidade_mapping[especialidade]['codigo']
@@ -1207,12 +1277,12 @@ class RealizarAgendamento(BaseView):
 
         # Verificar se a resposta foi bem-sucedida
         if response.status_code != 200:
-            return Response({"error": "Erro ao buscar subespecialidade."}, status=response.status_code)
+            return Response({"data": "Erro ao buscar subespecialidade."}, status=response.status_code)
 
         subespecialidade_data = response.data.get('data', [])
         # Verificar se dados foram encontrados
         if not subespecialidade_data:
-            return Response({"error": f"Subespecialidade '{sub_especialidade}' não encontrada."}, status=status.HTTP_404_NOT_FOUND)
+            return Response({"data": f"Subespecialidade '{sub_especialidade}' não encontrada."}, status=status.HTTP_404_NOT_FOUND)
 
         # Acessar o código da subespecialidade
         subespecialidade_cd = subespecialidade_data[0]['VSUES_CD']
@@ -1226,12 +1296,12 @@ class RealizarAgendamento(BaseView):
 
         # Verificar se a resposta foi bem-sucedida
         if response.status_code != 200:
-            return Response({"error": "Erro ao buscar convenio."}, status=response.status_code)
+            return Response({"data": "Erro ao buscar convenio."}, status=response.status_code)
 
         convenio_data = response.data.get('data', [])
 
         if not convenio_data:
-            return Response({"error": f"Convenio {descricao_convenio} não encontrado"}, status=400)
+            return Response({"data": f"Convenio {descricao_convenio} não encontrado"}, status=400)
         
         convenio_cd = convenio_data[0]['VCONV_CD']
         logger.info(f"Convenio {descricao_convenio} tem codigo {convenio_cd}")
@@ -1244,12 +1314,12 @@ class RealizarAgendamento(BaseView):
         response = self.query_database(custom_query=plano_query, column_names=["VPLAN_CD", "VSUP2_CD"])
         # Verificar se a resposta foi bem-sucedida
         if response.status_code != 200:
-            return Response({"error": "Erro ao buscar plano."}, status=response.status_code)
+            return Response({"data": "Erro ao buscar plano."}, status=response.status_code)
 
         plano_data = response.data.get('data', [])
         
         if not plano_data:
-            return Response({"error": f"Plano {descricao_plano} não encontrado"}, status=400)
+            return Response({"data": f"Plano {descricao_plano} não encontrado"}, status=400)
         
         plano_cd, subplano_cd = plano_data[0]['VPLAN_CD'], plano_data[0]['VSUP2_CD']
         logger.info(f'Codigo do plano {descricao_plano}: {plano_cd}')
@@ -1319,7 +1389,7 @@ class RealizarAgendamento(BaseView):
             errors = stderr.read().decode().strip()
 
             if errors:
-                return Response({"error": errors}, status=status.HTTP_400_BAD_REQUEST)
+                return Response({"data": errors}, status=status.HTTP_400_BAD_REQUEST)
             
             output = output.replace('C??digo', 'Código').strip()
             clean_output = ' '.join(output.replace('\r', '').split())
@@ -1347,9 +1417,9 @@ class RealizarAgendamento(BaseView):
                 }
                 return JsonResponse(response_data, status=400)
 
-            return JsonResponse({"message": clean_output}, status=200)
+            return JsonResponse({"data": clean_output}, status=200)
         except Exception as e:
-            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"data": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         finally:
             if client:
                 client.close()
@@ -1378,12 +1448,12 @@ class CadastrarNovoConveio(BaseView):
 
         # Verificar se a resposta foi bem-sucedida
         if response.status_code != 200:
-            return Response({"error": "Erro ao buscar convenio."}, status=response.status_code)
+            return Response({"data": "Erro ao buscar convenio."}, status=response.status_code)
 
         convenio_data = response.data.get('data', [])
 
         if not convenio_data:
-            return Response({"error": f"Convenio {descricao_convenio} não encontrado"}, status=400)
+            return Response({"data": f"Convenio {descricao_convenio} não encontrado"}, status=400)
         
         convenio_cd = convenio_data[0]['VCONV_CD']
         logger.info(f"Convenio {descricao_convenio} tem codigo {convenio_cd}")
@@ -1396,7 +1466,7 @@ class CadastrarNovoConveio(BaseView):
         response = self.query_database(custom_query=plano_query, column_names=["VPLAN_CD", "VSUP2_CD"])
         # Verificar se a resposta foi bem-sucedida
         if response.status_code != 200:
-            return Response({"error": "Erro ao buscar plano."}, status=response.status_code)
+            return Response({"data": "Erro ao buscar plano."}, status=response.status_code)
 
         plano_data = response.data.get('data', [])
         
@@ -1470,11 +1540,196 @@ class CadastrarNovoConveio(BaseView):
             cleaned_output = cleaned_output.strip()
 
 
-            return Response({"message": cleaned_output}, status=status.HTTP_200_OK)   
+            return Response({"data": cleaned_output}, status=status.HTTP_200_OK)   
         except Exception as e:
-            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"data": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         finally:
             if client:
                 client.close()
+
+class CancelarConsultaView(BaseView):
+    parser_classes = [JSONParser]
+
+    def post(self, request):
+        patient_id = request.data.get('cpf')
+        cd_agendam = request.data.get('codigo_agendamento')
+
+        if not patient_id or not cd_agendam:
+            return Response({"data": "Os parâmetros 'de CPF' e 'código agendamento' são obrigatórios."}, status=status.HTTP_400_BAD_REQUEST)
+
+        cancelamento = self.cancelar_consulta(patient_id, cd_agendam)
+        if 'error' in cancelamento:
+            return Response({"data": cancelamento['error']}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        if 'message' in cancelamento:
+            return Response({"data": cancelamento['message']}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response({"data": cancelamento['message']}, status=status.HTTP_200_OK)
+    
+    def cancelar_consulta(self, patient_id, cd_agendam):
+        plsql_block = f"""
+        DECLARE
+          p_erro BOOLEAN := FALSE;
+          p_erro_cd NUMBER;
+          p_erro_mt VARCHAR2(4000);
+          p_origem VARCHAR2(2) := 'C';
+          p_patient_id NUMBER := {patient_id};
+          p_cd_agendam NUMBER := {cd_agendam};
+
+        BEGIN
+          app_agd.P_APP_CANCELAR(
+            P_ERRO          => p_erro,
+            P_ERRO_CD       => p_erro_cd,
+            P_ERRO_MT       => p_erro_mt,
+            P_ORIGEM        => p_origem,
+            P_PATIENT_ID    => p_patient_id,
+            P_CD_AGENDAM    => p_cd_agendam
+          );
+          
+          IF NOT p_erro THEN
+            DBMS_OUTPUT.PUT_LINE('Cancelamento realizado com sucesso para o agendamento: ' || p_cd_agendam);
+          ELSE
+            DBMS_OUTPUT.PUT_LINE('Erro ao tentar cancelar o agendamento: ' || p_cd_agendam || ' - ' || p_erro_mt);
+          END IF;
+        END;
+        /
+        """
+        # print("Cancelar consulta PL/SQL block:", plsql_block)
+        
+        try:
+            client = get_ssh_client(config('HOSTNAME'), config('SSH_PORT', cast=int), config('USERNAME_ORACLE'), config('PASSWORD'))
+            stdin, stdout, stderr = client.exec_command(f"""
+            export LD_LIBRARY_PATH={config('SQLPLUS_PATH')}:$LD_LIBRARY_PATH
+            export PATH={config('SQLPLUS_PATH')}:$PATH
+            echo "{plsql_block}" | sqlplus -S {config('CONNECTION_STRING')}
+            """)
+            output = stdout.read().decode().strip()
+            errors = stderr.read().decode().strip()
+
+            if errors:
+                return {"error": errors}
+
+            # Processa a saída para determinar o resultado
+            if 'Cancelamento realizado com sucesso' in output:
+                message = f"Cancelamento realizado com sucesso para o agendamento: {cd_agendam}"
+            else:
+                message = f"Erro ao tentar cancelar o agendamento: {cd_agendam}"
+
+            return {"message": message}
+        except paramiko.SSHException as e:
+            return {"error": str(e)}
+        finally:
+            client.close()
+
+
+class VerConsultasFuturasView(BaseView):
+    parser_classes = [JSONParser]
+
+    def post(self, request):
+        patient_id = request.data.get('cpf')
+        vgpro_cd = 1
+        vprre_cd = request.data.get('especialidade')
+
+        if not patient_id or not vgpro_cd or not vprre_cd:
+            return Response({"data": "Os parâmetros 'cpf' e 'especialidade' são obrigatórios."}, status=status.HTTP_400_BAD_REQUEST)
+
+        consultas = self.ver_consultas_futuras(patient_id, vgpro_cd, vprre_cd)
+        if 'error' in consultas:
+            return Response({"data": consultas['error']}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        if 'message' in consultas:
+            return Response({"data": consultas['message']}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response({"data": consultas}, status=status.HTTP_200_OK)
+
+    def ver_consultas_futuras(self, patient_id, vgpro_cd, vprre_cd):
+        plsql_block = f"""
+        SET SERVEROUTPUT ON SIZE UNLIMITED;
+
+        DECLARE
+          p_erro BOOLEAN := FALSE;
+          p_erro_cd NUMBER;
+          p_erro_mt VARCHAR2(4000);
+          p_recordset SYS_REFCURSOR;
+          p_origem VARCHAR2(2) := 'C';
+          p_patient_id NUMBER := {patient_id};
+          p_vgpro_cd NUMBER := {vgpro_cd};
+          p_vprre_cd NUMBER := {vprre_cd};
+
+          v_unid_cd NUMBER;
+          v_cocl_cd NUMBER;
+          v_cocl_nm VARCHAR2(100);
+          v_gpro_cd NUMBER;
+          v_agma_cd NUMBER;
+          v_dt DATE;
+          v_hh NUMBER;
+          v_mi NUMBER;
+          v_cd_agendamento NUMBER;
+
+        BEGIN
+          app_agd.VER_AGD_EXISTENTE(
+            P_ERRO          => p_erro,
+            P_ERRO_CD       => p_erro_cd,
+            P_ERRO_MT       => p_erro_mt,
+            P_RECORDSET     => p_recordset,
+            P_ORIGEM        => p_origem,
+            P_PATIENT_ID    => p_patient_id,
+            P_vGPRO_CD      => p_vgpro_cd,
+            P_vPRRE_CD      => p_vprre_cd
+          );
+
+          IF NOT p_erro THEN
+            DBMS_OUTPUT.PUT_LINE('Consulta de agendamentos futuros iniciada...');
+            LOOP
+              FETCH p_recordset INTO v_unid_cd, v_cocl_cd, v_cocl_nm, v_gpro_cd, v_agma_cd, v_dt, v_hh, v_mi, v_cd_agendamento;
+              EXIT WHEN p_recordset%NOTFOUND;
+              DBMS_OUTPUT.PUT_LINE('Unidade CD: ' || v_unid_cd || ', Médico: ' || v_cocl_nm || ', Data: ' || TO_CHAR(v_dt, 'DD-MM-YYYY') || ', Hora: ' || LPAD(v_hh, 2, '0') || ':' || LPAD(v_mi, 2, '0') || ', Agendamento CD: ' || v_cd_agendamento);
+            END LOOP;
+            CLOSE p_recordset;
+          ELSE
+            DBMS_OUTPUT.PUT_LINE('Erro: ' || TO_CHAR(p_erro_cd) || ' - ' || p_erro_mt);
+          END IF;
+        END;
+        /
+        """
+        # print("Ver consultas futuras PL/SQL block:", plsql_block)
+        
+        try:
+            client = get_ssh_client(config('HOSTNAME'), config('SSH_PORT', cast=int), config('USERNAME_ORACLE'), config('PASSWORD'))
+            stdin, stdout, stderr = client.exec_command(f"""
+            export LD_LIBRARY_PATH={config('SQLPLUS_PATH')}:$LD_LIBRARY_PATH
+            export PATH={config('SQLPLUS_PATH')}:$PATH
+            echo "{plsql_block}" | sqlplus -S {config('CONNECTION_STRING')}
+            """)
+            output = stdout.read().decode().strip()
+            errors = stderr.read().decode().strip()
+
+            if errors:
+                return {"error": errors}
+
+            # Processa a saída para determinar o resultado
+            consultas = self.parse_consultas_futuras(output)
+            if not consultas:
+                return {"message": "Nenhuma consulta futura encontrada."}
+
+            return consultas
+        except paramiko.SSHException as e:
+            return {"error": str(e)}
+        finally:
+            client.close()
+
+    
+    def parse_consultas_futuras(self, output):
+        consultas = []
+        lines = output.split('\n')
+        for line in lines:
+            if 'Unidade CD' in line:
+                consulta = {}
+                parts = line.split(', ')
+                for part in parts:
+                    key, value = part.split(': ')
+                    key = key.strip().replace('M??dico', 'Médico')
+                    consulta[key] = value.strip()
+                consultas.append(consulta)
+        return consultas
+
 
 
