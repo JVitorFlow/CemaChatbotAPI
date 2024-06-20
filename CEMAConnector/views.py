@@ -198,12 +198,10 @@ class UnidView(BaseView):
             if not count_data or int(count_data[0]['COUNT']) == 0:
                 return Response({"data": f"Unidade '{unidade}' não encontrada."}, status=status.HTTP_404_NOT_FOUND)
         else:
-            # Lista de unidades sugeridas
-            sugestoes = ['BELEM', 'ITAQUERA', 'ARICANDUVA']
-            unidades_sugeridas = ', '.join(f"'{unid}'" for unid in sugestoes)
-            where_clause = f"VUNID_DS IN ({unidades_sugeridas})"
+            # Sem filtro de unidade, trazer todas
+            where_clause = "1=1"  # Isso é usado para garantir que a consulta funcione sem filtro específico
             order_by = "ORDER BY VUNID_DS"
-
+            
         unid_query = f"""
         SET LINESIZE 32767
         SET PAGESIZE 50000
@@ -217,7 +215,6 @@ class UnidView(BaseView):
             FROM {self.table_name}
             WHERE {where_clause}
         )
-        WHERE rn <= 3
         {order_by};
         """
 
@@ -301,7 +298,6 @@ class ConvenioDetalhesView(BaseView):
             FROM V_APP_CONVENIO
             WHERE {where_clause}
         )
-        WHERE rn <= 3
         {order_by};
         """
         # print("Convenios query:", convenios_query)
@@ -327,7 +323,7 @@ class ConvenioDetalhesView(BaseView):
                     ROW_NUMBER() OVER (ORDER BY VPLAN_CD) AS row_num
                 FROM V_APP_CONV_PLAN
                 WHERE VCONV_CD = '{vconv_cd}'
-            ) WHERE row_num <= 3;
+            );
             """
             # print("Planos query para VCONV_CD:", vconv_cd, "é", planos_query)
             planos_response = self.query_database(custom_query=planos_query, column_names=["VPLAN_CD", "VPLAN_DS", "VSUP2_CD"])
@@ -1442,7 +1438,8 @@ class CadastrarNovoConveio(BaseView):
 
         # Obtem código do convenio atraves da descrição
         convenio_query = f"""
-        SELECT VCONV_CD FROM V_APP_CONVENIO WHERE UPPER(VCONV_DS) = UPPER('{descricao_convenio}');
+        SELECT VCONV_CD FROM V_APP_CONVENIO 
+        WHERE UPPER(REPLACE(VCONV_DS, ' ', '')) = UPPER(REPLACE('{descricao_convenio}', ' ', ''));
         """
         response = self.query_database(custom_query=convenio_query, column_names=["VCONV_CD"])
 
@@ -1461,8 +1458,11 @@ class CadastrarNovoConveio(BaseView):
         # Obter código do plano/subplano pelo código de convênio
         plano_query = f"""
         SET COLSEP '|'
-        SELECT VPLAN_CD, VSUP2_CD FROM V_APP_CONV_PLAN WHERE VCONV_CD = {convenio_cd} AND UPPER(VPLAN_DS) = UPPER('{descricao_plano}');
+        SELECT VPLAN_CD, VSUP2_CD FROM V_APP_CONV_PLAN 
+        WHERE VCONV_CD = {convenio_cd} 
+        AND UPPER(REPLACE(VPLAN_DS, ' ', '')) = UPPER(REPLACE('{descricao_plano}', ' ', ''));
         """
+        # print(plano_query)
         response = self.query_database(custom_query=plano_query, column_names=["VPLAN_CD", "VSUP2_CD"])
         # Verificar se a resposta foi bem-sucedida
         if response.status_code != 200:
@@ -1471,7 +1471,7 @@ class CadastrarNovoConveio(BaseView):
         plano_data = response.data.get('data', [])
         
         if not plano_data:
-            return Response({"error": f"Plano {descricao_plano} não encontrado"}, status=400)
+            return Response({"data": f"Plano {descricao_plano} não encontrado"}, status=400)
         
         plano_cd = plano_data[0]['VPLAN_CD']
         logger.info(f'Codigo do plano {descricao_plano}: {plano_cd}')
@@ -1530,6 +1530,8 @@ class CadastrarNovoConveio(BaseView):
             output = stdout.read().decode().strip()
             errors = stderr.read().decode().strip()
 
+            # print(plsql_command)
+
             if errors:
                 return Response({"error": errors}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1567,6 +1569,7 @@ class CancelarConsultaView(BaseView):
     
     def cancelar_consulta(self, patient_id, cd_agendam):
         plsql_block = f"""
+        SET SERVEROUTPUT ON SIZE UNLIMITED;
         DECLARE
           p_erro BOOLEAN := FALSE;
           p_erro_cd NUMBER;
@@ -1593,7 +1596,7 @@ class CancelarConsultaView(BaseView):
         END;
         /
         """
-        # print("Cancelar consulta PL/SQL block:", plsql_block)
+        print("Cancelar consulta PL/SQL block:", plsql_block)
         
         try:
             client = get_ssh_client(config('HOSTNAME'), config('SSH_PORT', cast=int), config('USERNAME_ORACLE'), config('PASSWORD'))
@@ -1623,6 +1626,21 @@ class CancelarConsultaView(BaseView):
 
 class VerConsultasFuturasView(BaseView):
     parser_classes = [JSONParser]
+
+    unidade_mapping = {
+        'BELEM': {'codigo': 1, 'nome': 'BELEM'},
+        'SANTANA': {'codigo': 17, 'nome': 'SANTANA'},
+        'ARICANDUVA': {'codigo': 19, 'nome': 'ARICANDUVA'},
+        'INTERLAGOS': {'codigo': 20, 'nome': 'INTERLAGOS'},
+        'TUCURUVI': {'codigo': 21, 'nome': 'TUCURUVI'},
+        'ELDORADO': {'codigo': 22, 'nome': 'ELDORADO'},
+        'S.BERNARDO': {'codigo': 23, 'nome': 'S.BERNARDO'},
+        'ITAQUERA': {'codigo': 24, 'nome': 'ITAQUERA'},
+        'W.PLAZA': {'codigo': 25, 'nome': 'W.PLAZA'},
+        'GUARULHOS': {'codigo': 26, 'nome': 'GUARULHOS'},
+        'OSASCO': {'codigo': 28, 'nome': 'OSASCO'},
+        'IBIRAPUERA': {'codigo': 31, 'nome': 'IBIRAPUERA'}
+    }
 
     def post(self, request):
         patient_id = request.data.get('cpf')
@@ -1681,7 +1699,12 @@ class VerConsultasFuturasView(BaseView):
             LOOP
               FETCH p_recordset INTO v_unid_cd, v_cocl_cd, v_cocl_nm, v_gpro_cd, v_agma_cd, v_dt, v_hh, v_mi, v_cd_agendamento;
               EXIT WHEN p_recordset%NOTFOUND;
-              DBMS_OUTPUT.PUT_LINE('Unidade CD: ' || v_unid_cd || ', Médico: ' || v_cocl_nm || ', Data: ' || TO_CHAR(v_dt, 'DD-MM-YYYY') || ', Hora: ' || LPAD(v_hh, 2, '0') || ':' || LPAD(v_mi, 2, '0') || ', Agendamento CD: ' || v_cd_agendamento);
+              DBMS_OUTPUT.PUT_LINE('Unidade_CD: ' || v_unid_cd);
+              DBMS_OUTPUT.PUT_LINE('Medico: ' || v_cocl_nm);
+              DBMS_OUTPUT.PUT_LINE('Data: ' || TO_CHAR(v_dt, 'DD-MM-YYYY'));
+              DBMS_OUTPUT.PUT_LINE('Hora: ' || LPAD(v_hh, 2, '0') || ':' || LPAD(v_mi, 2, '0'));
+              DBMS_OUTPUT.PUT_LINE('Agendamento_CD: ' || v_cd_agendamento);
+              DBMS_OUTPUT.PUT_LINE('---');
             END LOOP;
             CLOSE p_recordset;
           ELSE
@@ -1690,7 +1713,6 @@ class VerConsultasFuturasView(BaseView):
         END;
         /
         """
-        # print("Ver consultas futuras PL/SQL block:", plsql_block)
         
         try:
             client = get_ssh_client(config('HOSTNAME'), config('SSH_PORT', cast=int), config('USERNAME_ORACLE'), config('PASSWORD'))
@@ -1716,20 +1738,44 @@ class VerConsultasFuturasView(BaseView):
         finally:
             client.close()
 
-    
     def parse_consultas_futuras(self, output):
-        consultas = []
+        results = []
+        current_consulta = {}
+
         lines = output.split('\n')
         for line in lines:
-            if 'Unidade CD' in line:
-                consulta = {}
-                parts = line.split(', ')
-                for part in parts:
-                    key, value = part.split(': ')
-                    key = key.strip().replace('M??dico', 'Médico')
-                    consulta[key] = value.strip()
-                consultas.append(consulta)
-        return consultas
+            line = line.strip()
+            if line.startswith('Unidade_CD:'):
+                if current_consulta:  # Adiciona a consulta atual ao resultado se já houver dados
+                    results.append(current_consulta)
+                    current_consulta = {}  # Reinicia o dicionário para a próxima consulta
+                unidade_cd = line.split(':', 1)[1].strip()
+                unidade_nome = next((v['nome'] for k, v in self.unidade_mapping.items() if v['codigo'] == int(unidade_cd)), unidade_cd)
+                current_consulta["Unidade"] = unidade_nome
+            elif line.startswith('Medico:'):
+                current_consulta["Médico"] = line.split(':', 1)[1].strip()
+            elif line.startswith('Data:'):
+                current_consulta["Data"] = line.split(':', 1)[1].strip()
+            elif line.startswith('Hora:'):
+                current_consulta["Hora"] = line.split(':', 1)[1].strip()
+            elif line.startswith('Agendamento_CD:'):
+                current_consulta["Agendamento CD"] = line.split(':', 1)[1].strip()
+            elif line == '---':
+                if current_consulta:  # Adiciona a consulta atual ao resultado quando o marcador de fim é encontrado
+                    results.append(current_consulta)
+                    current_consulta = {}  # Reinicia o dicionário para a próxima consulta
+
+        if current_consulta:  # Adiciona a última consulta se houver
+            results.append(current_consulta)
+
+        if not results:  # Se não encontrou nenhuma consulta
+            return "Nenhuma consulta futura encontrada."
+        else:
+            return results  # Usa "data" como chave principal
+
+
+
+
 
 
 
