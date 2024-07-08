@@ -10,6 +10,8 @@ import paramiko
 from datetime import datetime
 from django.http import JsonResponse
 import logging
+import os
+from django.conf import settings
 
 logger = logging.getLogger('django')
 
@@ -41,7 +43,7 @@ class BaseView(APIView):
 
     
     def query_database(self, table_name=None, column_names=None, request=None, custom_query=None):
-        hostname = config('HOSTNAME')
+        hostname = settings.HOSTNAME
         ssh_port = config('SSH_PORT', cast=int)
         username = config('USERNAME_ORACLE')
         password = config('PASSWORD')
@@ -71,7 +73,7 @@ class BaseView(APIView):
             """
 
         try:
-            client = get_ssh_client(hostname, ssh_port, username, password)
+            client = get_ssh_client(settings.HOSTNAME, ssh_port, username, password)
             stdin, stdout, stderr = client.exec_command(f"""
             export LD_LIBRARY_PATH={sqlplus_path}:$LD_LIBRARY_PATH
             export PATH={sqlplus_path}:$PATH
@@ -117,7 +119,7 @@ class SubespView(BaseView):
             FROM v_app_subesp
             WHERE {where_clause};
             """
-            # print(check_query)
+            #print(check_query)
 
             check_response = self.query_database(custom_query=check_query, column_names=["COUNT"])
             if check_response.status_code != 200:
@@ -480,7 +482,10 @@ class BuscarPacienteView(APIView):
     parser_classes = [JSONParser]
 
     def post(self, request, format=None):
+
         patient_phone = request.data.get('patient_phone')
+        logger.debug(f"Paciente_phone recebido: {patient_phone}")
+
         if not patient_phone:
             return Response({"data": "O número de telefone do paciente é obrigatório"}, status=status.HTTP_400_BAD_REQUEST)
         
@@ -562,21 +567,30 @@ class BuscarPacienteView(APIView):
             END;
             /
             """
-
+            client = None
             try:
-                client = get_ssh_client(config('HOSTNAME'), config('SSH_PORT', cast=int), config('USERNAME_ORACLE'), config('PASSWORD'))
+
+                hostname = os.getenv('HOSTNAME')
+                port = int(os.getenv('SSH_PORT'))
+                username = os.getenv('USERNAME_ORACLE')
+                password = os.getenv('PASSWORD')
+                sqlplus_path = os.getenv('SQLPLUS_PATH')
+                connection_string = os.getenv('CONNECTION_STRING')
+
+                client = get_ssh_client(hostname, port, username, password)
                 stdin, stdout, stderr = client.exec_command(f"""
-                export LD_LIBRARY_PATH={config('SQLPLUS_PATH')}:$LD_LIBRARY_PATH
-                export PATH={config('SQLPLUS_PATH')}:$PATH
-                echo "{plsql_block}" | sqlplus -S {config('CONNECTION_STRING')}
+                export LD_LIBRARY_PATH={sqlplus_path}:$LD_LIBRARY_PATH
+                export PATH={sqlplus_path}:$PATH
+                echo "{plsql_block}" | sqlplus -S {connection_string}
                 """)
                 # print(plsql_block)
                 errors = stderr.read().decode('utf-8')
                 if errors:
+                    logger.error(f"Errors during SQL execution: {errors}")
                     return {"error": errors}, None
 
                 output = stdout.read().decode('utf-8').strip()
-            
+                logger.debug(f"SQL output: {output}")
 
                 # Processar a saída para criar objetos JSON
                 data = {}
@@ -590,9 +604,11 @@ class BuscarPacienteView(APIView):
 
                 return {}, data
             except paramiko.SSHException as e:
+                logger.error(f"SSHException: {str(e)}")
                 return {"error": str(e)}, None # Erro no SSH
             finally:
-                client.close()
+                if client:
+                    client.close()
 
 class CadastrarNovoPaciente(APIView):
     parser_classes = [JSONParser]
@@ -900,7 +916,7 @@ class BuscarDataDisponivel(BaseView):
             echo "{plsql_block}" | sqlplus -S {config('CONNECTION_STRING')}
             """)
 
-            # print(plsql_block)
+            #print(plsql_block)
             
             errors = stderr.read().decode('utf-8')
             if errors:
@@ -1596,7 +1612,7 @@ class CancelarConsultaView(BaseView):
         END;
         /
         """
-        print("Cancelar consulta PL/SQL block:", plsql_block)
+        #print("Cancelar consulta PL/SQL block:", plsql_block)
         
         try:
             client = get_ssh_client(config('HOSTNAME'), config('SSH_PORT', cast=int), config('USERNAME_ORACLE'), config('PASSWORD'))
@@ -1772,10 +1788,3 @@ class VerConsultasFuturasView(BaseView):
             return "Nenhuma consulta futura encontrada."
         else:
             return results  # Usa "data" como chave principal
-
-
-
-
-
-
-

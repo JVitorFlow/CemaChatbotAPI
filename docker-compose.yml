@@ -1,0 +1,32 @@
+version: '3'
+services:
+  web:
+    build:
+      context: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/var/www/html
+      - ./staticfiles:/var/www/html/staticfiles
+      - ./temp:/var/www/html/temp
+    environment:
+      - DJANGO_SETTINGS_MODULE=core.settings
+      - PYTHONUNBUFFERED=1
+      - HOSTNAME=10.1.1.250
+      - SSH_PORT=22
+      - USERNAME_ORACLE=wtime
+      - PASSWORD=12345678
+      - SQLPLUS_PATH=/home/wtime/Transferencias/instantclient_11_2/
+      - CONNECTION_STRING=chatbotusr/mudar123@10.1.1.17:1521/bh02.world
+    command: gunicorn core.wsgi:application --bind 0.0.0.0:8000 --config gunicorn.conf.py
+    restart: always
+
+  nginx:
+    build:
+      context: .
+      dockerfile: Dockerfile.nginx
+    ports:
+      - "80:80"
+    depends_on:
+      - web
+    restart: always
