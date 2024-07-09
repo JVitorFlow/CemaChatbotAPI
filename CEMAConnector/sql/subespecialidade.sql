@@ -5,4 +5,4 @@ SET TRIMSPOOL ON
 SET WRAP OFF
 SELECT COUNT(*) AS COUNT
 FROM v_app_subesp
-WHERE {where_clause}
+WHERE {where_clause};

@@ -555,7 +555,7 @@ class BuscarDataDisponivel(BaseView):
 
         # Acessar o código da subespecialidade
         subespecialidade_cd = subespecialidade_data[0]['VSUES_CD']
-        print(f"subespecialidade {subespecialidade} tem código {subespecialidade_cd}")
+        # print(f"subespecialidade {subespecialidade} tem código {subespecialidade_cd}")
 
         try:
             data_consulta_obj = datetime.strptime(data_consulta, '%d/%m/%Y')
@@ -566,7 +566,6 @@ class BuscarDataDisponivel(BaseView):
             return Response({"data": "Formato de data inválido. Use 'DD/MM/YYYY'."}, status=status.HTTP_400_BAD_REQUEST)
         
         plsql_block = load_sql_file('buscar_data_disponivel.sql')
-        print(plsql_block)
         plsql_block = plsql_block.format(unidade_codigo=unidade_codigo, especialidade_codigo=especialidade_codigo, subespecialidade_cd=subespecialidade_cd, data_formatada=data_formatada)
 
 
@@ -1103,7 +1102,7 @@ class VerConsultasFuturasView(BaseView):
     def ver_consultas_futuras(self, patient_id, vgpro_cd, vprre_cd):
         plsql_block = load_sql_file('ver_consultas_futuras.sql')
         
-          # Substituir os placeholders no SQL com os valores reais
+        # Substituir os placeholders no SQL com os valores reais
         plsql_block = plsql_block.format(patient_id=patient_id, vgpro_cd=vgpro_cd, vprre_cd=vprre_cd)
 
         try:

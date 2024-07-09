@@ -8,7 +8,7 @@ DECLARE
   p_origem VARCHAR2(2) := 'C';
   p_patient_id NUMBER := {patient_id};
   p_vgpro_cd NUMBER := {vgpro_cd};
-  p_vprre_cd NUMBER := {vprre_cd}
+  p_vprre_cd NUMBER := {vprre_cd};
   v_unid_cd NUMBER;
   v_cocl_cd NUMBER;
   v_cocl_nm VARCHAR2(100);
@@ -17,7 +17,7 @@ DECLARE
   v_dt DATE;
   v_hh NUMBER;
   v_mi NUMBER;
-  v_cd_agendamento NUMBER
+  v_cd_agendamento NUMBER;
 BEGIN
   app_agd.VER_AGD_EXISTENTE(
     P_ERRO          => p_erro,
@@ -28,7 +28,7 @@ BEGIN
     P_PATIENT_ID    => p_patient_id,
     P_vGPRO_CD      => p_vgpro_cd,
     P_vPRRE_CD      => p_vprre_cd
-  )
+  );
   IF NOT p_erro THEN
     DBMS_OUTPUT.PUT_LINE('Consulta de agendamentos futuros iniciada...');
     LOOP
