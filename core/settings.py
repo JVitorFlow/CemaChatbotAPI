@@ -141,10 +141,9 @@ LOGGING = {
 }
 
 
-
 HOSTNAME = config('HOSTNAME')
 SSH_PORT = config('SSH_PORT', cast=int)
-username = config('USERNAME_ORACLE')
-password = config('PASSWORD')
-sqlplus_path = config('SQLPLUS_PATH')
-connection_string = config('CONNECTION_STRING')
+USERNAME = config('USERNAME_ORACLE')
+PASSWORD = config('PASSWORD')
+SQLPLUS_PATH = config('SQLPLUS_PATH')
+CONNECTION_STRING = config('CONNECTION_STRING')

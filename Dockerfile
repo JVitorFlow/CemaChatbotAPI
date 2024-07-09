@@ -12,20 +12,12 @@ RUN apt-get update && apt-get install -y \
 # Crie o diretório de trabalho
 WORKDIR /var/www/html
 
-# Instale o virtualenv
-RUN pip install --upgrade pip
-RUN pip install virtualenv
-
-# Crie e ative o ambiente virtual
-RUN virtualenv venv
-ENV VIRTUAL_ENV /var/www/html/venv
-ENV PATH /var/www/html/venv/bin:$PATH
-
 # Copie os arquivos de requisitos
 COPY requirements.txt .
 
-# Instale as dependências do Python no ambiente virtual
-RUN /var/www/html/venv/bin/pip install --no-cache-dir -r requirements.txt
+# Instale as dependências do Python
+RUN pip install --upgrade pip
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Criar o diretório staticfiles
 RUN mkdir -p /var/www/html/staticfiles

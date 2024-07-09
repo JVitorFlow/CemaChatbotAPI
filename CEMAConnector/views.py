@@ -12,8 +12,20 @@ from django.http import JsonResponse
 import logging
 import os
 from django.conf import settings
+from .utils.mappings import get_unidade_by_nome, get_unidade_by_codigo
+
 
 logger = logging.getLogger('django')
+
+
+def load_sql_file(filename):
+    try:
+        filepath = os.path.join(settings.BASE_DIR, 'CEMAConnector', 'sql', filename)
+        with open(filepath, 'r', encoding='utf-8') as file:
+            return file.read()
+    except Exception as e:
+        print(f"Erro ao carregar o arquivo SQL: {e}")
+        return None
 
 
 class BaseView(APIView):
@@ -43,12 +55,6 @@ class BaseView(APIView):
 
     
     def query_database(self, table_name=None, column_names=None, request=None, custom_query=None):
-        hostname = settings.HOSTNAME
-        ssh_port = config('SSH_PORT', cast=int)
-        username = config('USERNAME_ORACLE')
-        password = config('PASSWORD')
-        sqlplus_path = config('SQLPLUS_PATH')
-        connection_string = config('CONNECTION_STRING')
 
         if custom_query:
             plsql_block = custom_query
@@ -57,27 +63,21 @@ class BaseView(APIView):
             filters = request.data.get('filters', {})
             where_clause = " AND ".join([f"{column} = '{value}'" for column, value in filters.items() if column in column_names])
 
-            plsql_block = f"""
-            SET PAGESIZE 0
-            SET FEEDBACK OFF
-            SET VERIFY OFF
-            SET HEADING OFF
-            SET ECHO OFF
-            SET LINESIZE 32767
-            SET TRIMSPOOL ON
-            SET COLSEP '|'
-            SELECT {", ".join(column_names)}
-            FROM {table_name}
-            {f'WHERE {where_clause}' if where_clause else ''};
-            EXIT;
-            """
-
+            plsql_block = load_sql_file('query.sql')
+        
+            # Substituir os placeholders no SQL com os valores reais
+            plsql_block = plsql_block.format(
+                columns=", ".join(column_names),
+                table=table_name,
+                where_clause=f'WHERE {where_clause}' if where_clause else ''
+            )
+        
         try:
-            client = get_ssh_client(settings.HOSTNAME, ssh_port, username, password)
+            client = get_ssh_client(settings.HOSTNAME, settings.SSH_PORT, settings.USERNAME, settings.PASSWORD)
             stdin, stdout, stderr = client.exec_command(f"""
-            export LD_LIBRARY_PATH={sqlplus_path}:$LD_LIBRARY_PATH
-            export PATH={sqlplus_path}:$PATH
-            echo "{plsql_block}" | sqlplus -S {connection_string}
+            export LD_LIBRARY_PATH={settings.SQLPLUS_PATH}:$LD_LIBRARY_PATH
+            export PATH={settings.SQLPLUS_PATH}:$PATH
+            echo "{plsql_block}" | sqlplus -S {settings.CONNECTION_STRING}
             """)
             
             errors = stderr.read().decode('utf-8')
@@ -109,17 +109,10 @@ class SubespView(BaseView):
             order_by = "ORDER BY VSUES_DS, VPRRE_DS"  # Agora também ordenando por especialidade
 
             # Verificar se a subespecialidade existe
-            check_query = f"""
-            SET LINESIZE 32767
-            SET PAGESIZE 50000
-            SET COLSEP '|'
-            SET TRIMSPOOL ON
-            SET WRAP OFF
-            SELECT COUNT(*) AS COUNT
-            FROM v_app_subesp
-            WHERE {where_clause};
-            """
-            #print(check_query)
+            check_query = load_sql_file('subespecialidade.sql')
+        
+            # Substituir os placeholders no SQL com os valores reais
+            check_query = check_query.format(where_clause=where_clause)
 
             check_response = self.query_database(custom_query=check_query, column_names=["COUNT"])
             if check_response.status_code != 200:
@@ -141,23 +134,9 @@ class SubespView(BaseView):
             where_clause = f"VSUES_DS IN ({subespecialidades_sugeridas})"
             order_by = "ORDER BY VPRRE_DS, VSUES_DS"  # Priorizar ordenação por especialidade quando sugestões forem usadas
 
-        subesp_query = f"""
-        SET LINESIZE 32767
-        SET PAGESIZE 50000
-        SET COLSEP '|'
-        SET TRIMSPOOL ON
-        SET WRAP OFF
-        SELECT VSUES_CD, VSUES_DS, VPRRE_DS
-        FROM (
-            SELECT VSUES_CD, VSUES_DS, VPRRE_DS,
-                   ROW_NUMBER() OVER (PARTITION BY VPRRE_DS, VSUES_DS ORDER BY VPRRE_DS, VSUES_DS) AS rn
-            FROM v_app_subesp
-            WHERE {where_clause}
-        )
-        WHERE rn <= 3
-        {order_by};
-        """
-
+        subesp_query = load_sql_file('ConsultaSubespLimitada.sql')
+        # Substituir os placeholders no SQL com os valores reais
+        subesp_query = subesp_query.format(where_clause=where_clause, order_by=order_by)
         response = self.query_database(custom_query=subesp_query, column_names=["VSUES_CD", "VSUES_DS", "VPRRE_DS"])
         if response.status_code != 200:
             return Response({"error": "Falha ao buscar dados", "details": response.data}, status=response.status_code)
@@ -181,17 +160,10 @@ class UnidView(BaseView):
             order_by = "ORDER BY VUNID_DS"
 
             # Verificar se a unidade existe
-            check_query = f"""
-            SET LINESIZE 32767
-            SET PAGESIZE 50000
-            SET COLSEP '|'
-            SET TRIMSPOOL ON
-            SET WRAP OFF
-            SELECT COUNT(*) AS COUNT
-            FROM {self.table_name}
-            WHERE UPPER(VUNID_DS) = UPPER('{unidade}');
-            """
-
+            check_query = load_sql_file('verifica_unidade.sql')
+        
+            # Substituir os placeholders no SQL com os valores reais
+            check_query = check_query.format(table_name=self.table_name, where_clause=where_clause)
             check_response = self.query_database(custom_query=check_query, column_names=["COUNT"])
             if check_response.status_code != 200:
                 return Response({"error": "Falha ao buscar dados", "details": check_response.data}, status=check_response.status_code)
@@ -204,21 +176,10 @@ class UnidView(BaseView):
             where_clause = "1=1"  # Isso é usado para garantir que a consulta funcione sem filtro específico
             order_by = "ORDER BY VUNID_DS"
             
-        unid_query = f"""
-        SET LINESIZE 32767
-        SET PAGESIZE 50000
-        SET COLSEP '|'
-        SET TRIMSPOOL ON
-        SET WRAP OFF
-        SELECT VUNID_CD, VUNID_DS, VLOGRADOURO, VNR, VCOMPL, VBAIRRO, VCIDADE, VCEP, VUF, VDDD, VTEL, VRAMAL, VUNID_APRES, VUNID_LOCAL
-        FROM (
-            SELECT VUNID_CD, VUNID_DS, VLOGRADOURO, VNR, VCOMPL, VBAIRRO, VCIDADE, VCEP, VUF, VDDD, VTEL, VRAMAL, VUNID_APRES, VUNID_LOCAL,
-                   ROW_NUMBER() OVER (PARTITION BY VUNID_DS ORDER BY VUNID_DS) AS rn
-            FROM {self.table_name}
-            WHERE {where_clause}
-        )
-        {order_by};
-        """
+
+        unid_query = load_sql_file('unidade.sql')        
+        # Substituir os placeholders no SQL com os valores reais
+        unid_query = unid_query.format(table_name=self.table_name, where_clause=where_clause, order_by=order_by)
 
         logger.info(f"Executando consulta {unid_query}")
         unid_response = self.query_database(custom_query=unid_query, column_names=self.column_names)
@@ -383,72 +344,20 @@ class BuscarConvenioView(BaseView):
         return cpf[-2:] == f"{digito1}{digito2}"
 
     def buscar_convenio(self, cpf):
-        plsql_block = f"""
-        SET SERVEROUTPUT ON SIZE UNLIMITED;
-        DECLARE
-            p_erro BOOLEAN := FALSE;
-            p_erro_cd NUMBER;
-            p_erro_mt VARCHAR2(4000);
-            p_obs VARCHAR2(4000);
-            p_obs_part VARCHAR2(4000);
-            p_possui_pac VARCHAR2(10);
-            p_possui_part VARCHAR2(10);
-            p_possui_conv VARCHAR2(10);
-            p_recordset SYS_REFCURSOR;
-            p_origem VARCHAR2(100) := 'C';
-            p_patient_id NUMBER := {cpf};  
 
-            v_tp VARCHAR2(20);
-            v_cd_conv NUMBER;
-            v_convenio VARCHAR2(100);
-            v_cd_plano NUMBER;
-            v_plano VARCHAR2(100);
-            v_produto VARCHAR2(100);
+        plsql_block = load_sql_file('buscar_convenio.sql')
+        
+        # Substituir os placeholders no SQL com os valores reais
+        plsql_block = plsql_block.format(cpf=cpf)
 
-        BEGIN
-        app_agd.BUSCAR_PAC_BOT_CONV(
-            P_ERRO          => p_erro,
-            P_ERRO_CD       => p_erro_cd,
-            P_ERRO_MT       => p_erro_mt,
-            P_OBS           => p_obs,
-            P_OBS_PART      => p_obs_part,
-            P_POSSUI_PAC    => p_possui_pac,
-            P_POSSUI_PART   => p_possui_part,
-            P_POSSUI_CONV   => p_possui_conv,
-            P_RECORDSET     => p_recordset,
-            P_ORIGEM        => p_origem,
-            P_PATIENT_ID    => p_patient_id
-        );
-
-        DBMS_OUTPUT.PUT_LINE('----- INICIO DOS REGISTROS -----');
-        LOOP
-            FETCH p_recordset INTO v_tp, v_cd_conv, v_convenio, v_cd_plano, v_plano, v_produto;
-            EXIT WHEN p_recordset%NOTFOUND;
-            DBMS_OUTPUT.PUT_LINE('Tipo: ' || v_tp);
-            DBMS_OUTPUT.PUT_LINE('Codigo Convenio: ' || v_cd_conv);
-            DBMS_OUTPUT.PUT_LINE('Convenio: ' || v_convenio);
-            DBMS_OUTPUT.PUT_LINE('Codigo Plano: ' || v_cd_plano);
-            DBMS_OUTPUT.PUT_LINE('Plano: ' || v_plano);
-            DBMS_OUTPUT.PUT_LINE('Produto: ' || v_produto);
-        END LOOP;
-        DBMS_OUTPUT.PUT_LINE('----- FIM DOS REGISTROS -----');
-
-        CLOSE p_recordset;
-
-        IF p_erro THEN
-            DBMS_OUTPUT.PUT_LINE('Erro: ' || TO_CHAR(p_erro_cd) || ' - ' || p_erro_mt);
-        END IF;
-
-        END;
-        /
-        """
         try:
-            client = get_ssh_client(config('HOSTNAME'), config('SSH_PORT', cast=int), config('USERNAME_ORACLE'), config('PASSWORD'))
+            client = get_ssh_client(settings.HOSTNAME, settings.SSH_PORT, settings.USERNAME, settings.PASSWORD)
             stdin, stdout, stderr = client.exec_command(f"""
-            export LD_LIBRARY_PATH={config('SQLPLUS_PATH')}:$LD_LIBRARY_PATH
-            export PATH={config('SQLPLUS_PATH')}:$PATH
-            echo "{plsql_block}" | sqlplus -S {config('CONNECTION_STRING')}
+            export LD_LIBRARY_PATH={settings.SQLPLUS_PATH}:$LD_LIBRARY_PATH
+            export PATH={settings.SQLPLUS_PATH}:$PATH
+            echo "{plsql_block}" | sqlplus -S {settings.CONNECTION_STRING}
             """)
+            
             errors = stderr.read().decode('utf-8')
             if errors:
                 return {"error": errors}
@@ -510,78 +419,18 @@ class BuscarPacienteView(APIView):
         }, status=status.HTTP_200_OK)
 
     def verificar_paciente(self, patient_phone):
-            plsql_block = f"""
-            SET SERVEROUTPUT ON SIZE UNLIMITED;
-
-            DECLARE
-            p_erro BOOLEAN := FALSE;
-            p_erro_cd NUMBER;
-            p_erro_mt VARCHAR2(4000);
-            p_recordset SYS_REFCURSOR;
-            p_origem VARCHAR2(100) := 'C';
-            p_patient_phone VARCHAR2(100) := '{patient_phone}';
-            p_patient_id NUMBER := NULL;
-
-            v_cd_app NUMBER;
-            v_nome VARCHAR2(100);
-            v_dt_nasc DATE;
-            v_sexo VARCHAR2(1);
-            v_telefone VARCHAR2(20);
-            v_email VARCHAR2(100);
-            v_cpf_pac_id VARCHAR2(20);
-            v_same_cd NUMBER;
-
-            BEGIN
-
-            app_agd.BUSCAR_PAC_BOT(
-                P_ORIGEM        => p_origem,
-                P_PATIENT_ID    => p_patient_id,
-                P_PATIENT_PHONE => p_patient_phone,
-                P_ERRO          => p_erro,
-                P_ERRO_CD       => p_erro_cd,
-                P_ERRO_MT       => p_erro_mt,
-                P_RECORDSET     => p_recordset
-            );
-                DBMS_OUTPUT.PUT_LINE('----- INICIO DOS REGISTROS -----');
-                DBMS_OUTPUT.PUT_LINE(RPAD('-', 80, '-'));
-            LOOP
-                FETCH p_recordset INTO v_cd_app, v_nome, v_dt_nasc, v_sexo, v_telefone, v_email, v_cpf_pac_id, v_same_cd;
-                EXIT WHEN p_recordset%NOTFOUND;
-                
-                DBMS_OUTPUT.PUT_LINE('CD_APP: ' || v_cd_app);
-                DBMS_OUTPUT.PUT_LINE('Nome: ' || v_nome);
-                DBMS_OUTPUT.PUT_LINE('Data de Nascimento: ' || TO_CHAR(v_dt_nasc, 'DD/MM/YYYY'));
-                DBMS_OUTPUT.PUT_LINE('Sexo: ' || v_sexo);
-                DBMS_OUTPUT.PUT_LINE('Telefone: ' || v_telefone);
-                DBMS_OUTPUT.PUT_LINE('Email: ' || v_email);
-                DBMS_OUTPUT.PUT_LINE('CPF/PAC ID: ' || v_cpf_pac_id);
-                DBMS_OUTPUT.PUT_LINE('SAME CD: ' || v_same_cd);
-                DBMS_OUTPUT.PUT_LINE(RPAD('-', 80, '-'));
-            END LOOP;
-            DBMS_OUTPUT.PUT_LINE('----- FIM DOS REGISTROS -----');
-            CLOSE p_recordset;
-
-            IF p_erro THEN
-                DBMS_OUTPUT.PUT_LINE('Erro: ' || TO_CHAR(p_erro_cd) || ' - ' || p_erro_mt);
-            END IF;
-            END;
-            /
-            """
+            plsql_block = load_sql_file('buscar_paciente.sql')
+        
+            # Substituir os placeholders no SQL com os valores reais
+            plsql_block = plsql_block.format(patient_phone=patient_phone)
             client = None
             try:
 
-                hostname = os.getenv('HOSTNAME')
-                port = int(os.getenv('SSH_PORT'))
-                username = os.getenv('USERNAME_ORACLE')
-                password = os.getenv('PASSWORD')
-                sqlplus_path = os.getenv('SQLPLUS_PATH')
-                connection_string = os.getenv('CONNECTION_STRING')
-
-                client = get_ssh_client(hostname, port, username, password)
+                client = get_ssh_client(settings.HOSTNAME, settings.SSH_PORT, settings.USERNAME, settings.PASSWORD)
                 stdin, stdout, stderr = client.exec_command(f"""
-                export LD_LIBRARY_PATH={sqlplus_path}:$LD_LIBRARY_PATH
-                export PATH={sqlplus_path}:$PATH
-                echo "{plsql_block}" | sqlplus -S {connection_string}
+                export LD_LIBRARY_PATH={settings.SQLPLUS_PATH}:$LD_LIBRARY_PATH
+                export PATH={settings.SQLPLUS_PATH}:$PATH
+                echo "{plsql_block}" | sqlplus -S {settings.CONNECTION_STRING}
                 """)
                 # print(plsql_block)
                 errors = stderr.read().decode('utf-8')
@@ -615,6 +464,11 @@ class CadastrarNovoPaciente(APIView):
     def post(self, request, *args, **kwargs):
         data = request.data
         telefone = request.data.get('telefone')
+        idade = request.data.get('Idade')
+        cpf = request.data.get('CPF')
+        nome = request.data.get('Nome')
+        sobrenome = request.data.get('Sobrenome')
+        email = request.data.get('Email')
 
         data_nascimento_formatada = datetime.strptime(data.get('Data de Nascimento'), '%d/%m/%Y').strftime('%Y-%m-%d')
 
@@ -625,62 +479,18 @@ class CadastrarNovoPaciente(APIView):
         # Remover qualquer possível espaço ou hífen que possa ter sido deixado
         telefone = telefone.replace(' ', '').replace('-', '')
         try:
-            client = get_ssh_client(config('HOSTNAME'), config('SSH_PORT', cast=int), config('USERNAME_ORACLE'), config('PASSWORD'))
-            plsql_block = f"""
-            SET SERVEROUTPUT ON SIZE UNLIMITED;
-            DECLARE
-                p_erro BOOLEAN := FALSE;
-                p_erro_cd NUMBER := NULL;
-                p_erro_mt VARCHAR2(4000) := NULL;
-                p_cd_bot NUMBER := NULL;
-                p_origem VARCHAR2(100) := 'C';
-                p_patient_id NUMBER := {data.get('CPF')};
-                p_patient_age NUMBER := {data.get('Idade')};
-                p_patient_name VARCHAR2(100) := '{data.get('Nome')} {data.get('Sobrenome')}';
-                p_patient_gender VARCHAR2(1) := '{data.get('Sexo')}';
-                p_patient_date_of_birth DATE := TO_DATE('{data_nascimento_formatada}', 'YYYY-MM-DD');
-                p_patient_phone VARCHAR2(100) := '{telefone}';
-                p_patient_email VARCHAR2(100) := '{data.get('Email')}';
-                p_patient_cpf VARCHAR2(100) := '{data.get('CPF')}';
-            BEGIN
-                app_agd.GERA_CD_PAC_BOT(
-                    P_ERRO                 => p_erro,
-                    P_ERRO_CD              => p_erro_cd,
-                    P_ERRO_MT              => p_erro_mt,
-                    P_CD_BOT               => p_cd_bot,
-                    P_ORIGEM               => p_origem,
-                    P_PATIENT_ID           => p_patient_id,
-                    P_PATIENT_AGE          => p_patient_age,
-                    P_PATIENT_NAME         => p_patient_name,
-                    P_PATIENT_GENDER       => p_patient_gender,
-                    P_PATIENT_DATE_OF_BIRTH=> p_patient_date_of_birth,
-                    P_PATIENT_PHONE        => p_patient_phone,
-                    P_PATIENT_EMAIL        => p_patient_email,
-                    P_PATIENT_CPF          => p_patient_cpf
-                );
-            
-                IF p_erro THEN
-                    DBMS_OUTPUT.PUT_LINE('Erro: ' || TO_CHAR(p_erro_cd) || ' - ' || p_erro_mt);
-                ELSE
-                    COMMIT;
-                    DBMS_OUTPUT.PUT_LINE('Cadastro de paciente realizado com sucesso. Código BOT gerado: ' || p_cd_bot);
-                END IF;
-            EXCEPTION
-                WHEN OTHERS THEN
-                    DBMS_OUTPUT.PUT_LINE('Exceção capturada: ' || SQLERRM);
-                    ROLLBACK;
-                    RAISE;
-            END;
-            /
-            """
+            client = get_ssh_client(settings.HOSTNAME, settings.SSH_PORT, settings.USERNAME, settings.PASSWORD)
+
+            plsql_block = load_sql_file('cadastar_paciente.sql')
+            # Substituir os placeholders no SQL com os valores reais
+            plsql_block = plsql_block.format(cpf=cpf, idade=idade, nome=nome, sobrenome=sobrenome, email=email,  data_nascimento_formatada=data_nascimento_formatada)
 
             # Execute the command
             stdin, stdout, stderr = client.exec_command(f"""
-            export LD_LIBRARY_PATH={config('SQLPLUS_PATH')}:$LD_LIBRARY_PATH
-            export PATH={config('SQLPLUS_PATH')}:$PATH
-            echo "{plsql_block}" | sqlplus -S {config('CONNECTION_STRING')}
+            export LD_LIBRARY_PATH={settings.SQLPLUS_PATH}:$LD_LIBRARY_PATH
+            export PATH={settings.SQLPLUS_PATH}:$PATH
+            echo "{plsql_block}" | sqlplus -S {settings.CONNECTION_STRING}
             """)
-
 
             # print(plsql_block)
             output = stdout.read().decode('utf-8', errors='ignore').strip()
@@ -707,68 +517,11 @@ class CadastrarNovoPaciente(APIView):
             client.close()
 
 class BuscarDataDisponivel(BaseView):
-    # app_agd.p_get_date_crm
-    """
-    COnfirma disponibilidade do médico na data informada
-    Endpoint para buscar datas disponíveis para procedimentos médicos em unidades específicas.
-
-    Parâmetros do POST:
-
-    - Unidade: Nome da unidade hospitalar (obrigatório). Deve ser uma das seguintes opções:
-        - 1: Belem 
-        - 17: Santana
-        - 19: Aricanduva
-        - 20: Interlagos
-        - 21: Tucuruvi
-        - 22: Eldorado
-        - 23: S.BERNARDO
-        - 24: Itaquera
-        - 25: W.Plaza
-        - 26: Guarulhos
-        - 28: Osasco
-        - 31: Ibirapuera
-
-    - procedimento: Tipo de procedimento médico (obrigatório). Opções disponíveis:
-        - 1: OFTALMOLOGIA
-        - 2: OTORRINOLARINGOLOGIA
-    - data_consulta`: Data para a qual a disponibilidade deve ser verificada (opcional). Se não for passada usa data atual como padrão
-
-     Funcionalidade:
-    Este endpoint interage com o sistema hospitalar para buscar disponibilidade de agendas baseadas na unidade e tipo de procedimento especificado. Retorna uma lista de datas e informações relacionadas, facilitando o agendamento de procedimentos pelos usuários.
-
-     Exemplo de Uso:
-    Para usar este endpoint, envie uma requisição POST com JSON contendo os campos 'unidade' e 'procedimento' especificados.
-
-     Requisição de exemplo:
-    json
-    {
-        "unidade": "Belem",
-        "procedimento": "OFTALMOLOGIA"
-        "data_consulta": "20/05/24"
-    }
-    ```
-
-     Resposta:
-    A resposta será uma lista de objetos, cada um representando uma data disponível e informações relacionadas, como código da unidade, descrição do procedimento, etc.
-    """
+    
     parser_classes = [JSONParser]
     def post(self, request, *args, **kwargs):
         data = request.data
-        unidade_mapping = {
-            'BELEM': {'codigo': 1, 'nome': 'BELEM'},
-            'SANTANA': {'codigo': 17, 'nome': 'SANTANA'},
-            'ARICANDUVA': {'codigo': 19, 'nome': 'ARICANDUVA'},
-            'INTERLAGOS': {'codigo': 20, 'nome': 'INTERLAGOS'},
-            'TUCURUVI': {'codigo': 21, 'nome': 'TUCURUVI'},
-            'ELDORADO': {'codigo': 22, 'nome': 'ELDORADO'},
-            'S.BERNARDO': {'codigo': 23, 'nome': 'S.BERNARDO'},
-            'ITAQUERA': {'codigo': 24, 'nome': 'ITAQUERA'},
-            'W.PLAZA': {'codigo': 25, 'nome': 'W.PLAZA'},
-            'GUARULHOS': {'codigo': 26, 'nome': 'GUARULHOS'},
-            'OSASCO': {'codigo': 28, 'nome': 'OSASCO'},
-            'IBIRAPUERA': {'codigo': 31, 'nome': 'IBIRAPUERA'}
-        }
-
+        
         especialidade_mapping = {
             'OFTALMOLOGIA': {'codigo': 1, 'descricao': 'Oftalmologia'},
             'OTORRINOLARINGOLOGIA': {'codigo': 2, 'descricao': 'Otorrinolaringologia'}
@@ -779,13 +532,11 @@ class BuscarDataDisponivel(BaseView):
         subespecialidade = data.get('subespecialidade', '').upper()
         data_consulta = data.get('data_consulta', datetime.now().strftime('%d/%m/%Y'))
 
-        if unidade not in unidade_mapping or especialidade not in especialidade_mapping:
-            return Response({"data": "Unidade ou especialidade inválido."}, status=status.HTTP_400_BAD_REQUEST)
+        unidade_codigo = get_unidade_by_nome(unidade)
+        if not unidade_codigo:
+            return Response({"error": "Unidade não encontrada."}, status=status.HTTP_400_BAD_REQUEST)
 
-
-        unidade_codigo = unidade_mapping[unidade]['codigo']
         especialidade_codigo = especialidade_mapping[especialidade]['codigo']
-
 
         subespecialidade_query = f"""
         SELECT VSUES_CD FROM v_app_subesp WHERE UPPER(VSUES_DS) = UPPER('{subespecialidade}');
@@ -804,7 +555,7 @@ class BuscarDataDisponivel(BaseView):
 
         # Acessar o código da subespecialidade
         subespecialidade_cd = subespecialidade_data[0]['VSUES_CD']
-        # print(f"subespecialidade {subespecialidade} tem código {subespecialidade_cd}")
+        print(f"subespecialidade {subespecialidade} tem código {subespecialidade_cd}")
 
         try:
             data_consulta_obj = datetime.strptime(data_consulta, '%d/%m/%Y')
@@ -814,115 +565,24 @@ class BuscarDataDisponivel(BaseView):
         except ValueError:
             return Response({"data": "Formato de data inválido. Use 'DD/MM/YYYY'."}, status=status.HTTP_400_BAD_REQUEST)
         
+        plsql_block = load_sql_file('buscar_data_disponivel.sql')
+        print(plsql_block)
+        plsql_block = plsql_block.format(unidade_codigo=unidade_codigo, especialidade_codigo=especialidade_codigo, subespecialidade_cd=subespecialidade_cd, data_formatada=data_formatada)
 
-        plsql_block = f"""
-        SET SERVEROUTPUT ON SIZE UNLIMITED;
-        
-        DECLARE
-            p_erro BOOLEAN := FALSE;
-            p_erro_cd NUMBER;
-            p_erro_mt VARCHAR2(4000);
-            p_recordset SYS_REFCURSOR;
-            p_origem VARCHAR2(100) := 'C';
-            p_vunid_cd NUMBER := {unidade_codigo};
-            p_vgpro_cd NUMBER := 1;
-            p_vprre_cd NUMBER := {especialidade_codigo};
-            p_vsues_cd NUMBER := {subespecialidade_cd};
-            p_vdt DATE := TO_DATE('{data_formatada}', 'YYYY-MM-DD');
-            p_vdt_fim DATE := NULL;
-            p_vcocl_cd NUMBER := NULL;
 
-            v_vunid_cd NUMBER;
-            v_vunid_ds VARCHAR2(100);
-            v_vcocl_cd NUMBER;
-            v_vcocl_nm VARCHAR2(100);
-            v_vgpro_cd NUMBER;
-            v_vgpro_ds VARCHAR2(100);
-            v_vagma_cd NUMBER;
-            v_vagma_ds VARCHAR2(100);
-            v_vprre_cd NUMBER;
-            v_vprre_ds VARCHAR2(100);
-            v_vsues_cd NUMBER;
-            v_vsues_ds VARCHAR2(100);
-            v_vagen_dt DATE;
-            v_vperc NUMBER;
-            v_vidade_min NUMBER;
-            v_vidade_max NUMBER;
-            v_vfl_nariz VARCHAR2(1);
-            v_vfl_garganta VARCHAR2(1);
-            v_vfl_ouvido VARCHAR2(1);
-
-        BEGIN
-            app_agd.p_get_date_crm(
-                p_origem     => p_origem,
-                p_vunid_cd   => p_vunid_cd,
-                p_vgpro_cd   => p_vgpro_cd,
-                p_vprre_cd   => p_vprre_cd,
-                p_vsues_cd   => p_vsues_cd,
-                p_vdt        => p_vdt,
-                p_vdt_fim    => p_vdt_fim,
-                p_vcocl_cd   => p_vcocl_cd,
-                p_erro       => p_erro,
-                p_erro_cd    => p_erro_cd,
-                p_erro_mt    => p_erro_mt,
-                p_recordset  => p_recordset
-            );
-
-            DBMS_OUTPUT.PUT_LINE('----- INÍCIO DOS REGISTROS -----');
-            DBMS_OUTPUT.PUT_LINE(RPAD('-', 80, '-'));
-
-            IF p_erro THEN
-                DBMS_OUTPUT.PUT_LINE('Erro encontrado: ' || p_erro_cd || ' - ' || p_erro_mt);
-            ELSE
-                DBMS_OUTPUT.PUT_LINE('Processando resultados...');
-                LOOP
-                    FETCH p_recordset INTO v_vunid_cd, v_vunid_ds, v_vcocl_cd, v_vcocl_nm, v_vgpro_cd, v_vgpro_ds, v_vagma_cd, v_vagma_ds, v_vprre_cd, v_vprre_ds, v_vsues_cd, v_vsues_ds, v_vagen_dt, v_vperc, v_vidade_min, v_vidade_max, v_vfl_nariz, v_vfl_garganta, v_vfl_ouvido;
-                    EXIT WHEN p_recordset%NOTFOUND;
-            
-                    DBMS_OUTPUT.PUT_LINE('VUNID_CD: ' || v_vunid_cd);
-                    DBMS_OUTPUT.PUT_LINE('VUNID_DS: ' || v_vunid_ds);
-                    DBMS_OUTPUT.PUT_LINE('VCOCL_CD: ' || v_vcocl_cd);
-                    DBMS_OUTPUT.PUT_LINE('VCOCL_NM: ' || v_vcocl_nm);
-                    DBMS_OUTPUT.PUT_LINE('VGPRO_CD: ' || v_vgpro_cd);
-                    DBMS_OUTPUT.PUT_LINE('VGPRO_DS: ' || v_vgpro_ds);
-                    DBMS_OUTPUT.PUT_LINE('VAGMA_CD: ' || v_vagma_cd);
-                    DBMS_OUTPUT.PUT_LINE('VAGMA_DS: ' || v_vagma_ds);
-                    DBMS_OUTPUT.PUT_LINE('VPRRE_CD: ' || v_vprre_cd);
-                    DBMS_OUTPUT.PUT_LINE('VPRRE_DS: ' || v_vprre_ds);
-                    DBMS_OUTPUT.PUT_LINE('VSUES_CD: ' || v_vsues_cd);
-                    DBMS_OUTPUT.PUT_LINE('VSUES_DS: ' || v_vsues_ds);
-                    DBMS_OUTPUT.PUT_LINE('VAGEN_DT: ' || TO_CHAR(v_vagen_dt, 'DD/MM/YYYY'));
-                    DBMS_OUTPUT.PUT_LINE('VPERC: ' || v_vperc);
-                    DBMS_OUTPUT.PUT_LINE('VIDADE_MIN: ' || v_vidade_min);
-                    DBMS_OUTPUT.PUT_LINE('VIDADE_MAX: ' || v_vidade_max);
-                    DBMS_OUTPUT.PUT_LINE('VFL_NARIZ: ' || v_vfl_nariz);
-                    DBMS_OUTPUT.PUT_LINE('VFL_GARGANTA: ' || v_vfl_garganta);
-                    DBMS_OUTPUT.PUT_LINE('VFL_OUVIDO: ' || v_vfl_ouvido);
-                    DBMS_OUTPUT.PUT_LINE(RPAD('-', 80, '-'));
-                END LOOP;
-                CLOSE p_recordset;
-            END IF;
-        EXCEPTION
-            WHEN OTHERS THEN
-                DBMS_OUTPUT.PUT_LINE('Exceção SQL capturada: ' || SQLCODE || ' - ' || SQLERRM);
-        END;
-        /
-        """
         try:
-            client = get_ssh_client(config('HOSTNAME'), config('SSH_PORT', cast=int), config('USERNAME_ORACLE'), config('PASSWORD'))
+            client = get_ssh_client(settings.HOSTNAME, settings.SSH_PORT, settings.USERNAME, settings.PASSWORD)
             stdin, stdout, stderr = client.exec_command(f"""
-            export LD_LIBRARY_PATH={config('SQLPLUS_PATH')}:$LD_LIBRARY_PATH
-            export PATH={config('SQLPLUS_PATH')}:$PATH
-            echo "{plsql_block}" | sqlplus -S {config('CONNECTION_STRING')}
+            export LD_LIBRARY_PATH={settings.SQLPLUS_PATH}:$LD_LIBRARY_PATH
+            export PATH={settings.SQLPLUS_PATH}:$PATH
+            echo "{plsql_block}" | sqlplus -S {settings.CONNECTION_STRING}
             """)
-
-            #print(plsql_block)
             
             errors = stderr.read().decode('utf-8')
             if errors:
                 return {"error": errors}, None
             
-            output = stdout.read().decode('utf-8').strip()
+            output = stdout.read().decode('utf-8', errors='ignore').strip()
             
             # Processamento de saída melhorado
             results = []
@@ -951,7 +611,7 @@ class BuscarDataDisponivel(BaseView):
                 medico_id = result.get('VCOCL_CD', 'Não especificado')
                 if medico_id not in grouped_results:
                     grouped_results[medico_id] = {
-                        "Unidade": unidade_mapping.get(unidade, {'nome': 'Desconhecido'})['nome'],
+                        "Unidade": get_unidade_by_codigo(unidade_codigo),
                         "CRM Médico": medico_id,
                         "Nome do Médico": result.get('VCOCL_NM', 'Não especificado'),
                         "Tipo de Consulta": result.get('VGPRO_DS', 'Consulta'),
@@ -977,20 +637,7 @@ class BuscarDataDisponivel(BaseView):
                 client.close()
 
 class BuscarHorario(BaseView):
-    """ Endpoint para buscar horários de consultas disponíveis.
 
-    Este endpoint espera receber uma requisição POST com os seguintes parâmetros:
-    - id_medico: Opcional. CRM do médico. Se não for fornecido, a busca retornará horários disponíveis de todos os médicos para a especialidade e sub-especialidade especificadas.
-    - unidade: Obrigatório. Unidade hospitalar onde a consulta será realizada.
-    - especialidade: Obrigatório. Especialidade médica da consulta.
-    - sub_especialidade: Obrigatório. Sub-especialidade dentro da especialidade médica.
-    - data_consulta: Obrigatório. Data desejada para a consulta no formato 'DD/MM/YYYY'.
-
-    A resposta será um JSON contendo os horários disponíveis. Se o 'id_medico' não for fornecido,
-    a busca incluirá todos os médicos qualificados na unidade e especialidade solicitadas.
-    """
-
-    # app_agd.p_bc_get_date
     parser_classes = [JSONParser]
 
     def query_database(self, custom_query=None, column_names=None):
@@ -998,21 +645,6 @@ class BuscarHorario(BaseView):
 
     def post(self, request, *args, **kwargs):
         data = request.data
-
-        unidade_mapping = {
-            'BELEM': {'codigo': 1, 'nome': 'BELEM'},
-            'SANTANA': {'codigo': 17, 'nome': 'SANTANA'},
-            'ARICANDUVA': {'codigo': 19, 'nome': 'ARICANDUVA'},
-            'INTERLAGOS': {'codigo': 20, 'nome': 'INTERLAGOS'},
-            'TUCURUVI': {'codigo': 21, 'nome': 'TUCURUVI'},
-            'ELDORADO': {'codigo': 22, 'nome': 'ELDORADO'},
-            'S.BERNARDO': {'codigo': 23, 'nome': 'S.BERNARDO'},
-            'ITAQUERA': {'codigo': 24, 'nome': 'ITAQUERA'},
-            'W.PLAZA': {'codigo': 25, 'nome': 'W.PLAZA'},
-            'GUARULHOS': {'codigo': 26, 'nome': 'GUARULHOS'},
-            'OSASCO': {'codigo': 28, 'nome': 'OSASCO'},
-            'IBIRAPUERA': {'codigo': 31, 'nome': 'IBIRAPUERA'}
-        }
 
         especialidade_mapping = {
             'OFTALMOLOGIA': {'codigo': 1, 'descricao': 'Oftalmologia'},
@@ -1033,12 +665,11 @@ class BuscarHorario(BaseView):
             data_formatada = data_consulta_obj.strftime('%Y-%m-%d')
         except ValueError:
             return Response({"error": "Formato de data inválido. Use 'DD/MM/YYYY'."}, status=status.HTTP_400_BAD_REQUEST)
+       
+        unidade_codigo = get_unidade_by_nome(unidade)
+        if not unidade_codigo:
+            return Response({"error": "Unidade não encontrada."}, status=status.HTTP_400_BAD_REQUEST)
 
-
-        if unidade not in unidade_mapping or especialidade not in especialidade_mapping:
-            return Response({"error": "Unidade ou especialidade inválido."}, status=status.HTTP_400_BAD_REQUEST)
-
-        unidade_codigo = unidade_mapping[unidade]['codigo']
         especialidade_codigo = especialidade_mapping[especialidade]['codigo']
         
 
@@ -1068,100 +699,15 @@ class BuscarHorario(BaseView):
         # Estabelece conexão SSH e executa o bloco PL/SQL
         try:
             
-            plsql_block = f"""
-            SET SERVEROUTPUT ON SIZE UNLIMITED;
+            plsql_block = load_sql_file('buscar_horario.sql')
+            # Substituir os placeholders no SQL com os valores reais
+            plsql_block = plsql_block.format(unidade_codigo=unidade_codigo, vprre_codigo=vprre_codigo, especialidade_codigo=especialidade_codigo, subespecialidade_cd=subespecialidade_cd, data_formatada=data_formatada, crm_medico_clause=crm_medico_clause)
 
-            DECLARE
-                p_erro BOOLEAN := FALSE;
-                p_erro_cd NUMBER;
-                p_erro_mt VARCHAR2(4000);
-                p_recordset SYS_REFCURSOR;
-                {crm_medico_clause};
-                p_vunid_cd NUMBER := {unidade_codigo}; 
-                p_vgpro_cd NUMBER := {vprre_codigo};
-                p_vprre_cd NUMBER := {especialidade_codigo};
-                p_vsues_cd NUMBER := {subespecialidade_cd};
-                p_vdt DATE := TO_DATE('{data_formatada}', 'YYYY-MM-DD');
-                p_vdt_fim DATE := NULL; 
-                v_vunid_cd NUMBER;
-                v_vunid_ds VARCHAR2(100);
-                v_vcocl_cd NUMBER;
-                v_vcocl_nm VARCHAR2(100);
-                v_vgpro_cd NUMBER;
-                v_vgpro_ds VARCHAR2(100);
-                v_vagma_cd NUMBER;
-                v_vagma_ds VARCHAR2(100);
-                v_vprre_cd NUMBER;
-                v_vprre_ds VARCHAR2(100);
-                v_vsues_cd NUMBER;
-                v_vsues_ds VARCHAR2(100);
-                v_agen_dt DATE;
-                v_vagho_hh NUMBER;
-                v_vagho_mi NUMBER;
-                v_perc NUMBER;
-                v_seq NUMBER;
-                v_idade_min NUMBER;
-                v_idade_max NUMBER;
-                v_fl_nariz VARCHAR2(1);
-                v_fl_garganta VARCHAR2(1);
-                v_fl_ouvido VARCHAR2(1);
-            BEGIN
-                app_agd.p_bc_get_date(
-                P_VCOCL_CD   => p_vcocd_cd,
-                P_ERRO       => p_erro,
-                P_ERRO_CD    => p_erro_cd,
-                P_ERRO_MT    => p_erro_mt,
-                P_RECORDSET  => p_recordset,
-                P_ORIGEM     => 'C',
-                P_VUNID_CD   => p_vunid_cd,
-                P_VGPRO_CD   => p_vgpro_cd,
-                P_VPRRE_CD   => p_vprre_cd,
-                P_VSUES_CD   => p_vsues_cd,
-                P_VDT        => p_vdt,
-                P_VDT_FIM    => p_vdt_fim
-            );
-                DBMS_OUTPUT.PUT_LINE('----- INICIO DOS REGISTROS -----');
-                DBMS_OUTPUT.PUT_LINE(RPAD('-', 80, '-'));
-              LOOP
-                FETCH p_recordset INTO v_vunid_cd, v_vunid_ds, v_vcocl_cd, v_vcocl_nm, v_vgpro_cd, v_vgpro_ds,
-                                    v_vagma_cd, v_vagma_ds, v_vprre_cd, v_vprre_ds, v_vsues_cd, v_vsues_ds,
-                                    v_agen_dt, v_vagho_hh, v_vagho_mi, v_perc, v_seq, v_idade_min, v_idade_max,
-                                    v_fl_nariz, v_fl_garganta, v_fl_ouvido;
-                EXIT WHEN p_recordset%NOTFOUND;
-                
-                DBMS_OUTPUT.PUT_LINE('Unidade: ' || v_vunid_ds);
-                DBMS_OUTPUT.PUT_LINE('Unidade CD: ' || v_vunid_cd || ' DS: ' || v_vunid_ds);
-                DBMS_OUTPUT.PUT_LINE('Codigo Local CD: ' || v_vcocl_cd || ' NM: ' || v_vcocl_nm);
-                DBMS_OUTPUT.PUT_LINE('Grupo Produto CD: ' || v_vgpro_cd || ' DS: ' || v_vgpro_ds);
-                DBMS_OUTPUT.PUT_LINE('Maquina CD: ' || v_vagma_cd || ' DS: ' || v_vagma_ds);
-                DBMS_OUTPUT.PUT_LINE('Preco CD: ' || v_vprre_cd || ' DS: ' || v_vprre_ds);
-                DBMS_OUTPUT.PUT_LINE('SUS CD: ' || v_vsues_cd || ' DS: ' || v_vsues_ds);
-                DBMS_OUTPUT.PUT_LINE('Data Agendamento: ' || TO_CHAR(v_agen_dt, 'DD-MON-YYYY'));
-                DBMS_OUTPUT.PUT_LINE('Hora HH: ' || LPAD(v_vagho_hh, 2, '0') || ':' || LPAD(v_vagho_mi, 2, '0'));
-                DBMS_OUTPUT.PUT_LINE('Percentual: ' || v_perc);
-                DBMS_OUTPUT.PUT_LINE('Sequencia: ' || v_seq);
-                DBMS_OUTPUT.PUT_LINE('Idade Minima: ' || v_idade_min || ' Maxima: ' || v_idade_max);
-                DBMS_OUTPUT.PUT_LINE('Nariz: ' || v_fl_nariz);
-                DBMS_OUTPUT.PUT_LINE('Garganta: ' || v_fl_garganta);
-                DBMS_OUTPUT.PUT_LINE('Ouvido: ' || v_fl_ouvido);
-                DBMS_OUTPUT.PUT_LINE(RPAD('-', 80, '-'));
-            END LOOP;
-            DBMS_OUTPUT.PUT_LINE('----- FIM DOS REGISTROS -----');
-
-            CLOSE p_recordset;
-
-            IF p_erro THEN
-                DBMS_OUTPUT.PUT_LINE('Erro: ' || TO_CHAR(p_erro_cd) || ' - ' || p_erro_mt);
-            END IF;
-            END;
-            /
-            """
-            # print(plsql_block)
-            client = get_ssh_client(config('HOSTNAME'), config('SSH_PORT', cast=int), config('USERNAME_ORACLE'), config('PASSWORD'))
+            client = get_ssh_client(settings.HOSTNAME, settings.SSH_PORT, settings.USERNAME, settings.PASSWORD)
             stdin, stdout, stderr = client.exec_command(f"""
-            export LD_LIBRARY_PATH={config('SQLPLUS_PATH')}:$LD_LIBRARY_PATH
-            export PATH={config('SQLPLUS_PATH')}:$PATH
-            echo "{plsql_block}" | sqlplus -S {config('CONNECTION_STRING')}
+            export LD_LIBRARY_PATH={settings.SQLPLUS_PATH}:$LD_LIBRARY_PATH
+            export PATH={settings.SQLPLUS_PATH}:$PATH
+            echo "{plsql_block}" | sqlplus -S {settings.CONNECTION_STRING}
             """)
 
             logger.info(plsql_block)
@@ -1233,20 +779,6 @@ class RealizarAgendamento(BaseView):
     def post(self, request, *args, **kwargs):
         data = request.data
 
-        unidade_mapping = {
-            'BELEM': {'codigo': 1, 'nome': 'BELEM'},
-            'SANTANA': {'codigo': 17, 'nome': 'SANTANA'},
-            'ARICANDUVA': {'codigo': 19, 'nome': 'ARICANDUVA'},
-            'INTERLAGOS': {'codigo': 20, 'nome': 'INTERLAGOS'},
-            'TUCURUVI': {'codigo': 21, 'nome': 'TUCURUVI'},
-            'ELDORADO': {'codigo': 22, 'nome': 'ELDORADO'},
-            'S.BERNARDO': {'codigo': 23, 'nome': 'S.BERNARDO'},
-            'ITAQUERA': {'codigo': 24, 'nome': 'ITAQUERA'},
-            'W.PLAZA': {'codigo': 25, 'nome': 'W.PLAZA'},
-            'GUARULHOS': {'codigo': 26, 'nome': 'GUARULHOS'},
-            'OSASCO': {'codigo': 28, 'nome': 'OSASCO'},
-            'IBIRAPUERA': {'codigo': 31, 'nome': 'IBIRAPUERA'}
-        }
 
         especialidade_mapping = {
             'OFTALMOLOGIA': {'codigo': 1, 'descricao': 'Oftalmologia'},
@@ -1274,11 +806,10 @@ class RealizarAgendamento(BaseView):
         except ValueError:
             return Response({"data": "Formato de data inválido. Use 'DD/MM/YYYY'."}, status=status.HTTP_400_BAD_REQUEST)
 
+        unidade_codigo = get_unidade_by_nome(unidade)
+        if not unidade_codigo:
+            return Response({"error": "Unidade não encontrada."}, status=status.HTTP_400_BAD_REQUEST)
 
-        if unidade not in unidade_mapping or especialidade not in especialidade_mapping:
-            return Response({"data": "Unidade ou especialidade inválido."}, status=status.HTTP_400_BAD_REQUEST)
-
-        unidade_codigo = unidade_mapping[unidade]['codigo']
         especialidade_codigo = especialidade_mapping[especialidade]['codigo']
 
         subespecialidade_query = f"""
@@ -1337,62 +868,32 @@ class RealizarAgendamento(BaseView):
         logger.info(f'Codigo do plano {descricao_plano}: {plano_cd}')
         logger.info(f'Codigo do subplano: {subplano_cd}')
 
-        
+        client = None
         try:            
             # Montagem do comando PL/SQL a ser executado
-            plsql_command = f"""
-            SET SERVEROUTPUT ON SIZE UNLIMITED;
+            plsql_command = load_sql_file('realizar_agendamento.sql')
+        
+            # Substituir os placeholders no SQL com os valores reais
+            plsql_command = plsql_command.format(
+                unidade_codigo=unidade_codigo,
+                vconsulta=vconsulta,
+                especialidade_codigo=especialidade_codigo,
+                subespecialidade_cd=subespecialidade_cd,
+                convenio_cd=convenio_cd,
+                plano_cd=plano_cd,
+                subplano_cd=subplano_cd,
+                data_formatada=data_formatada,
+                hora_agenda=hora_agenda,
+                minuto_agenda=minuto_agenda,
+                crm_medico=crm_medico,
+                cpf=cpf
+            )
 
-            DECLARE
-                p_erro BOOLEAN := FALSE;
-                p_erro_cd NUMBER;
-                p_erro_mt VARCHAR2(4000);
-                p_cd_agend NUMBER;
-                p_obs_agend VARCHAR2(4000);
-                p_aaso_ano NUMBER := NULL;
-                p_aaso_cd NUMBER := NULL;
-                p_origem VARCHAR2(100) := 'C';
-                p_vunid_cd NUMBER := {unidade_codigo};
-                p_vgpro_cd NUMBER := {vconsulta};
-                p_vprre_cd NUMBER := {especialidade_codigo};
-                p_vsues_cd NUMBER := {subespecialidade_cd};
-                p_vconv_cd NUMBER := {convenio_cd};
-                p_vpla2_cd NUMBER := {plano_cd};
-                p_vsup2_cd VARCHAR2(100) := '{subplano_cd}';
-                p_vdt DATE := TO_DATE('{data_formatada}', 'YYYY-MM-DD');
-                p_vhh NUMBER := {hora_agenda};
-                p_vmi NUMBER := {minuto_agenda};
-                p_vcocl_cd NUMBER := {crm_medico};
-                p_patient_id NUMBER := {cpf};
-                p_patient_age NUMBER := NULL;
-                p_patient_name VARCHAR2(100) := NULL;
-                p_patient_gender VARCHAR2(100) := NULL;
-                p_patient_dob DATE := NULL;
-                p_patient_phone VARCHAR2(100) := NULL;
-                p_patient_email VARCHAR2(100) := NULL;
-                p_patient_cpf VARCHAR2(100) := NULL;
-
-            BEGIN
-                app_agd.P_APP_AGENDAR(
-                    p_erro, p_erro_cd, p_erro_mt, p_cd_agend, p_obs_agend, p_aaso_ano, p_aaso_cd, p_origem,
-                    p_vunid_cd, p_vgpro_cd, p_vprre_cd, p_vsues_cd, p_vconv_cd, p_vpla2_cd, p_vsup2_cd,
-                    p_vdt, p_vhh, p_vmi, p_vcocl_cd, p_patient_id, p_patient_age, p_patient_name, p_patient_gender,
-                    p_patient_dob, p_patient_phone, p_patient_email, p_patient_cpf
-                );
-
-                IF p_erro THEN
-                    DBMS_OUTPUT.PUT_LINE('Erro: ' || p_erro_mt || ' Código de Erro: ' || TO_CHAR(p_erro_cd) || ' Código de Agendamento: ' || TO_CHAR(p_cd_agend));
-                ELSE
-                    DBMS_OUTPUT.PUT_LINE('Agendamento realizado com sucesso. Código: ' || TO_CHAR(p_cd_agend) || ' Observações: ' || p_obs_agend);
-                END IF;
-            END;
-            /
-            """
-            client = get_ssh_client(config('HOSTNAME'), config('SSH_PORT', cast=int), config('USERNAME_ORACLE'), config('PASSWORD'))
+            client = get_ssh_client(settings.HOSTNAME, settings.SSH_PORT, settings.USERNAME, settings.PASSWORD)
             stdin, stdout, stderr = client.exec_command(f"""
-            export LD_LIBRARY_PATH={config('SQLPLUS_PATH')}:$LD_LIBRARY_PATH
-            export PATH={config('SQLPLUS_PATH')}:$PATH
-            echo "{plsql_command}" | sqlplus -S {config('CONNECTION_STRING')}
+            export LD_LIBRARY_PATH={settings.SQLPLUS_PATH}:$LD_LIBRARY_PATH
+            export PATH={settings.SQLPLUS_PATH}:$PATH
+            echo "{plsql_command}" | sqlplus -S {settings.CONNECTION_STRING}
             """)
 
             logger.info(plsql_command)
@@ -1492,55 +993,18 @@ class CadastrarNovoConveio(BaseView):
         plano_cd = plano_data[0]['VPLAN_CD']
         logger.info(f'Codigo do plano {descricao_plano}: {plano_cd}')
 
+        client = None
         try:            
             # Montagem do comando PL/SQL a ser executado
-            plsql_command = f"""           
-            SET SERVEROUTPUT ON SIZE UNLIMITED;
+            plsql_block = load_sql_file('cadastrar_convenio.sql')
+            # Substituir os placeholders no SQL com os valores reais
+            plsql_block = plsql_block.format(convenio_cd=convenio_cd, plano_cd=plano_cd, cpf=cpf)
 
-            DECLARE
-            p_erro BOOLEAN := FALSE;
-            p_erro_cd NUMBER;
-            p_erro_mt VARCHAR2(4000);
-            p_apbc_cd NUMBER;
-            p_origem VARCHAR2(2) := 'C';
-            p_tp_conv VARCHAR2(2) := 'C';
-            p_conv_cd NUMBER := {convenio_cd};
-            p_pla2_cd NUMBER := {plano_cd};
-            p_sup2_cd VARCHAR2(2) := '*';
-            p_patient_id NUMBER := {cpf};
-
-            BEGIN
-            app_agd.GERA_PAC_BOT_CNV(
-                P_ERRO          => p_erro,
-                P_ERRO_CD       => p_erro_cd,
-                P_ERRO_MT       => p_erro_mt,
-                P_APBC_CD       => p_apbc_cd,
-                P_ORIGEM        => p_origem,
-                P_TP_CONV       => p_tp_conv,
-                P_CONV_CD       => p_conv_cd,
-                P_PLA2_CD       => p_pla2_cd,
-                P_SUP2_CD       => p_sup2_cd,
-                P_PATIENT_ID    => p_patient_id
-            );
-
-            IF p_erro THEN
-                DBMS_OUTPUT.PUT_LINE('Erro: ' || TO_CHAR(p_erro_cd) || ' - ' || p_erro_mt);
-            ELSE
-                IF p_apbc_cd > 0 THEN
-                DBMS_OUTPUT.PUT_LINE('Cadastro de convenio realizado com sucesso. Codigo gerado: ' || p_apbc_cd);
-                ELSE
-                DBMS_OUTPUT.PUT_LINE('Procedimento completado sem erros, mas não foi gerado um código válido.');
-                END IF;
-            END IF;
-            END;
-            /
-            """
-
-            client = get_ssh_client(config('HOSTNAME'), config('SSH_PORT', cast=int), config('USERNAME_ORACLE'), config('PASSWORD'))
+            client = get_ssh_client(settings.HOSTNAME, settings.SSH_PORT, settings.USERNAME, settings.PASSWORD)
             stdin, stdout, stderr = client.exec_command(f"""
-            export LD_LIBRARY_PATH={config('SQLPLUS_PATH')}:$LD_LIBRARY_PATH
-            export PATH={config('SQLPLUS_PATH')}:$PATH
-            echo "{plsql_command}" | sqlplus -S {config('CONNECTION_STRING')}
+            export LD_LIBRARY_PATH={settings.SQLPLUS_PATH}:$LD_LIBRARY_PATH
+            export PATH={settings.SQLPLUS_PATH}:$PATH
+            echo "{plsql_block}" | sqlplus -S {settings.CONNECTION_STRING}
             """)
 
             output = stdout.read().decode().strip()
@@ -1584,42 +1048,19 @@ class CancelarConsultaView(BaseView):
         return Response({"data": cancelamento['message']}, status=status.HTTP_200_OK)
     
     def cancelar_consulta(self, patient_id, cd_agendam):
-        plsql_block = f"""
-        SET SERVEROUTPUT ON SIZE UNLIMITED;
-        DECLARE
-          p_erro BOOLEAN := FALSE;
-          p_erro_cd NUMBER;
-          p_erro_mt VARCHAR2(4000);
-          p_origem VARCHAR2(2) := 'C';
-          p_patient_id NUMBER := {patient_id};
-          p_cd_agendam NUMBER := {cd_agendam};
-
-        BEGIN
-          app_agd.P_APP_CANCELAR(
-            P_ERRO          => p_erro,
-            P_ERRO_CD       => p_erro_cd,
-            P_ERRO_MT       => p_erro_mt,
-            P_ORIGEM        => p_origem,
-            P_PATIENT_ID    => p_patient_id,
-            P_CD_AGENDAM    => p_cd_agendam
-          );
-          
-          IF NOT p_erro THEN
-            DBMS_OUTPUT.PUT_LINE('Cancelamento realizado com sucesso para o agendamento: ' || p_cd_agendam);
-          ELSE
-            DBMS_OUTPUT.PUT_LINE('Erro ao tentar cancelar o agendamento: ' || p_cd_agendam || ' - ' || p_erro_mt);
-          END IF;
-        END;
-        /
-        """
         #print("Cancelar consulta PL/SQL block:", plsql_block)
+
+        plsql_block = load_sql_file('cancelar_consultas.sql')
         
+          # Substituir os placeholders no SQL com os valores reais
+        plsql_block = plsql_block.format(patient_id=patient_id, cd_agendam=cd_agendam)
+
         try:
-            client = get_ssh_client(config('HOSTNAME'), config('SSH_PORT', cast=int), config('USERNAME_ORACLE'), config('PASSWORD'))
+            client = get_ssh_client(settings.HOSTNAME, settings.SSH_PORT, settings.USERNAME, settings.PASSWORD)
             stdin, stdout, stderr = client.exec_command(f"""
-            export LD_LIBRARY_PATH={config('SQLPLUS_PATH')}:$LD_LIBRARY_PATH
-            export PATH={config('SQLPLUS_PATH')}:$PATH
-            echo "{plsql_block}" | sqlplus -S {config('CONNECTION_STRING')}
+            export LD_LIBRARY_PATH={settings.SQLPLUS_PATH}:$LD_LIBRARY_PATH
+            export PATH={settings.SQLPLUS_PATH}:$PATH
+            echo "{plsql_block}" | sqlplus -S {settings.CONNECTION_STRING}
             """)
             output = stdout.read().decode().strip()
             errors = stderr.read().decode().strip()
@@ -1643,21 +1084,6 @@ class CancelarConsultaView(BaseView):
 class VerConsultasFuturasView(BaseView):
     parser_classes = [JSONParser]
 
-    unidade_mapping = {
-        'BELEM': {'codigo': 1, 'nome': 'BELEM'},
-        'SANTANA': {'codigo': 17, 'nome': 'SANTANA'},
-        'ARICANDUVA': {'codigo': 19, 'nome': 'ARICANDUVA'},
-        'INTERLAGOS': {'codigo': 20, 'nome': 'INTERLAGOS'},
-        'TUCURUVI': {'codigo': 21, 'nome': 'TUCURUVI'},
-        'ELDORADO': {'codigo': 22, 'nome': 'ELDORADO'},
-        'S.BERNARDO': {'codigo': 23, 'nome': 'S.BERNARDO'},
-        'ITAQUERA': {'codigo': 24, 'nome': 'ITAQUERA'},
-        'W.PLAZA': {'codigo': 25, 'nome': 'W.PLAZA'},
-        'GUARULHOS': {'codigo': 26, 'nome': 'GUARULHOS'},
-        'OSASCO': {'codigo': 28, 'nome': 'OSASCO'},
-        'IBIRAPUERA': {'codigo': 31, 'nome': 'IBIRAPUERA'}
-    }
-
     def post(self, request):
         patient_id = request.data.get('cpf')
         vgpro_cd = 1
@@ -1675,67 +1101,17 @@ class VerConsultasFuturasView(BaseView):
         return Response({"data": consultas}, status=status.HTTP_200_OK)
 
     def ver_consultas_futuras(self, patient_id, vgpro_cd, vprre_cd):
-        plsql_block = f"""
-        SET SERVEROUTPUT ON SIZE UNLIMITED;
-
-        DECLARE
-          p_erro BOOLEAN := FALSE;
-          p_erro_cd NUMBER;
-          p_erro_mt VARCHAR2(4000);
-          p_recordset SYS_REFCURSOR;
-          p_origem VARCHAR2(2) := 'C';
-          p_patient_id NUMBER := {patient_id};
-          p_vgpro_cd NUMBER := {vgpro_cd};
-          p_vprre_cd NUMBER := {vprre_cd};
-
-          v_unid_cd NUMBER;
-          v_cocl_cd NUMBER;
-          v_cocl_nm VARCHAR2(100);
-          v_gpro_cd NUMBER;
-          v_agma_cd NUMBER;
-          v_dt DATE;
-          v_hh NUMBER;
-          v_mi NUMBER;
-          v_cd_agendamento NUMBER;
-
-        BEGIN
-          app_agd.VER_AGD_EXISTENTE(
-            P_ERRO          => p_erro,
-            P_ERRO_CD       => p_erro_cd,
-            P_ERRO_MT       => p_erro_mt,
-            P_RECORDSET     => p_recordset,
-            P_ORIGEM        => p_origem,
-            P_PATIENT_ID    => p_patient_id,
-            P_vGPRO_CD      => p_vgpro_cd,
-            P_vPRRE_CD      => p_vprre_cd
-          );
-
-          IF NOT p_erro THEN
-            DBMS_OUTPUT.PUT_LINE('Consulta de agendamentos futuros iniciada...');
-            LOOP
-              FETCH p_recordset INTO v_unid_cd, v_cocl_cd, v_cocl_nm, v_gpro_cd, v_agma_cd, v_dt, v_hh, v_mi, v_cd_agendamento;
-              EXIT WHEN p_recordset%NOTFOUND;
-              DBMS_OUTPUT.PUT_LINE('Unidade_CD: ' || v_unid_cd);
-              DBMS_OUTPUT.PUT_LINE('Medico: ' || v_cocl_nm);
-              DBMS_OUTPUT.PUT_LINE('Data: ' || TO_CHAR(v_dt, 'DD-MM-YYYY'));
-              DBMS_OUTPUT.PUT_LINE('Hora: ' || LPAD(v_hh, 2, '0') || ':' || LPAD(v_mi, 2, '0'));
-              DBMS_OUTPUT.PUT_LINE('Agendamento_CD: ' || v_cd_agendamento);
-              DBMS_OUTPUT.PUT_LINE('---');
-            END LOOP;
-            CLOSE p_recordset;
-          ELSE
-            DBMS_OUTPUT.PUT_LINE('Erro: ' || TO_CHAR(p_erro_cd) || ' - ' || p_erro_mt);
-          END IF;
-        END;
-        /
-        """
+        plsql_block = load_sql_file('ver_consultas_futuras.sql')
         
+          # Substituir os placeholders no SQL com os valores reais
+        plsql_block = plsql_block.format(patient_id=patient_id, vgpro_cd=vgpro_cd, vprre_cd=vprre_cd)
+
         try:
-            client = get_ssh_client(config('HOSTNAME'), config('SSH_PORT', cast=int), config('USERNAME_ORACLE'), config('PASSWORD'))
+            client = get_ssh_client(settings.HOSTNAME, settings.SSH_PORT, settings.USERNAME, settings.PASSWORD)
             stdin, stdout, stderr = client.exec_command(f"""
-            export LD_LIBRARY_PATH={config('SQLPLUS_PATH')}:$LD_LIBRARY_PATH
-            export PATH={config('SQLPLUS_PATH')}:$PATH
-            echo "{plsql_block}" | sqlplus -S {config('CONNECTION_STRING')}
+            export LD_LIBRARY_PATH={settings.SQLPLUS_PATH}:$LD_LIBRARY_PATH
+            export PATH={settings.SQLPLUS_PATH}:$PATH
+            echo "{plsql_block}" | sqlplus -S {settings.CONNECTION_STRING}
             """)
             output = stdout.read().decode().strip()
             errors = stderr.read().decode().strip()
@@ -1766,7 +1142,7 @@ class VerConsultasFuturasView(BaseView):
                     results.append(current_consulta)
                     current_consulta = {}  # Reinicia o dicionário para a próxima consulta
                 unidade_cd = line.split(':', 1)[1].strip()
-                unidade_nome = next((v['nome'] for k, v in self.unidade_mapping.items() if v['codigo'] == int(unidade_cd)), unidade_cd)
+                unidade_nome = get_unidade_by_codigo(unidade_cd)
                 current_consulta["Unidade"] = unidade_nome
             elif line.startswith('Medico:'):
                 current_consulta["Médico"] = line.split(':', 1)[1].strip()
